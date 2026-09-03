@@ -1,0 +1,25 @@
+# Contains real patient data (chart number, physician name, visit note)
+# embedded in an original screenshot — must never be published.
+dm_p4p/630125684509638912_OS99-申請P1407糖尿病診斷自動列為主診斷-109.07.02.md
+
+# Raw scanned originals (pdf/doc) — not needed for the code repo, and one of
+# them carries the same embedded patient screenshot as the file excluded above.
+dm_p4p/original files pdf doc/
+
+# Part 2（臨床決策支援管線，dm_care_pipeline）已獨立拆分至專屬 repo
+# https://github.com/zinojeng/CoDoClaw.git ——本 repo（diabetes_P4P）只保留
+# Part 1（P14/P7 收案資格判斷引擎，dm_eligibility），避免兩個 repo 內容
+#混雜。以下路徑仍會留在本機工作目錄供繼續開發，但不進本 repo 的 git 追蹤。
+src/dm_care_pipeline/
+tests/test_care_pipeline.py
+tests/dm_care_pipeline/
+docs/臨床決策支援管線設計.md
+docs/臨床決策支援管線設計_v2_OpenClaw.md
+OpenClaw for Diabetes HIS.md
+
+# Local tooling / build artifacts
+.metadata_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+.DS_Store
