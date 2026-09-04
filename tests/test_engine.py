@@ -639,6 +639,60 @@ def test_p4301_ckd_proteinuria_measured_but_below_threshold_is_blocked():
     assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
 
 
+def test_p4301_ckd_diabetic_upcr_negative_but_uacr_missing_is_data_gap():
+    """回歸測試（Codex review 二次驗證發現的殘留bug）：糖尿病患者eGFR=70
+    (合格區間)，UPCR已測得且未達150門檻，但UACR未測——UACR仍可能是
+    遺漏的陽性結果(>=30)，不能視為「資料齊全、確定不符合」，應維持
+    DATA_GAP，不可誤判為BLOCKED。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-UPCR-ONLY",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=50.0, uacr=None, is_diabetic=True)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.DATA_GAP
+
+
+def test_p4301_ckd_diabetic_uacr_negative_but_upcr_missing_is_data_gap():
+    """同上，另一半：糖尿病患者UACR已測得且未達30門檻，但UPCR未測——
+    UPCR仍可能是遺漏的陽性結果(>=150)，應維持DATA_GAP。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-UACR-ONLY",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=None, uacr=10.0, is_diabetic=True)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.DATA_GAP
+
+
+def test_p4301_ckd_non_diabetic_upcr_negative_uacr_irrelevant_is_blocked():
+    """對照組：非糖尿病患者只看UPCR一項（UACR門檻本就只對糖尿病患適用），
+    UPCR已測得且未達門檻時，即使UACR未測也應視為資料齊全、確定不符合
+    （BLOCKED），因為UACR對非糖尿病患者的Stage判定完全不影響結果。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-NONDIABETIC-UPCR-ONLY",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=50.0, uacr=None, is_diabetic=False)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
 # ---------------------------------------------------------------------------
 # 15. P7003C：轉診條件「資料不足」vs「資料齊全但未達標」的分類
 #     （回歸測試——Codex review 發現的分類錯誤：原本 referral_indicated
@@ -676,6 +730,41 @@ def test_p7003_referral_condition_blocked_when_data_complete_but_not_indicated()
     referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
     assert len(referral_reasons) == 1
     assert referral_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+def test_p7003_referral_condition_satisfied_by_upcr_even_when_egfr_missing():
+    """UPCR>=1000本身已足以判定符合轉診條件，即使eGFR缺測也不影響——
+    OR條件其中一項已知為真時，另一項缺測不應被視為資料不足。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P7003-UPCR-QUALIFIES",
+        as_of,
+        claims=[CodeClaim(code="P4301C", claim_date=as_of - timedelta(days=100))],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=None, upcr=1200.0, is_diabetic=False)],
+        pre_esrd_referral_confirmed=True,
+    )
+    result = check_p7003_eligibility(state)
+    referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
+    assert referral_reasons == []
+    assert any("符合轉診條件" in r for r in result.reasons)
+
+
+def test_p7003_referral_condition_data_gap_when_egfr_known_negative_but_upcr_missing():
+    """eGFR=60(未達<45門檻)已知，但UPCR缺測——UPCR仍可能是遺漏的陽性
+    結果(>=1000)，應為DATA_GAP，不可視為確定不符合(BLOCKED)。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P7003-EGFR-ONLY",
+        as_of,
+        claims=[CodeClaim(code="P4301C", claim_date=as_of - timedelta(days=100))],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=60.0, upcr=None, is_diabetic=False)],
+        pre_esrd_referral_confirmed=True,
+    )
+    result = check_p7003_eligibility(state)
+    assert result.eligible is False
+    referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
+    assert len(referral_reasons) == 1
+    assert referral_reasons[0].kind == MissingReasonKind.DATA_GAP
 
 
 # ---------------------------------------------------------------------------

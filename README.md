@@ -53,7 +53,7 @@ P4P 專案「儘可能不干擾醫療照護行為」的目標，具體展開是�
 寫回時同步呼叫（事件驅動），還是每日批次掃描在院病人（排程驅動）；本
 repo 不預設任何一種，因為這屬於院內系統架構決策。
 
-**② 本 repo：判斷**——已完整實作且有測試覆蓋（16 個測試）。
+**② 本 repo：判斷**——已完整實作且有測試覆蓋（28 個測試）。
 `EligibilityEngine.evaluate(state, physician)` 是唯一入口，純函式、無
 副作用、不呼叫任何外部系統；`EligibilityReport.eligible_codes()` 給
 分支 A 用。分支 B/C 的判斷曾經是本節的一個已知缺口——`missing_
@@ -65,7 +65,12 @@ requirements` 舊版是純字串清單，「距上次申報僅10天，未滿70�
 only()` 對應分支 B（純排程等待，保持靜默），`actionable_missing_
 reasons()` 對應分支 C（值得通知/協助處理），其中 `kind=DATA_GAP` 是
 「協助開立所需檢驗」的直接候選。舊的 `missing_requirements: list[str]`
-欄位保留、內容與順序完全不變，向下相容既有呼叫端。
+欄位保留、與 `missing_reasons` 內容/順序同步不變（此不變式由測試保證，
+見 `test_missing_requirements_matches_missing_reasons_details_in_order`），
+向下相容既有呼叫端——但個別缺項的**文字描述本身**在後續修正分類錯誤
+時可能變動（例如「查無CKD分期評估資料」曾在2026-09-05更正措辭），
+若呼叫端對 `missing_requirements` 做字串完全比對（而非只檢查非空/
+子字串），需留意這點。
 
 **③ 外層系統：動作**——目前不存在，也**刻意不在本 repo 範圍內**：本
 repo 沒有健保申報 API 的知識，也沒有院內 CPOE 開立檢驗醫令的介面資訊，
@@ -135,7 +140,7 @@ p4p/
 pip install -r requirements.txt
 ```
 
-執行測試（16 個測試）：
+執行測試（28 個測試）：
 
 ```bash
 pytest tests/ -q

@@ -205,10 +205,16 @@ class CKDAssessment:
             （BLOCKED）——即使蛋白尿資料也缺，eGFR本身已排除Stage1/2/3a。
           - 45<=eGFR<60：Stage3a只看eGFR，不需蛋白尿佐證，資料已足夠
             （不會是data_incomplete，此時必為符合）。
-          - eGFR>=60：Stage1/2需蛋白尿(UPCR>=150或糖尿病患UACR>=30)佐證；
-            若UPCR缺、且(非糖尿病 或 UACR缺)，代表無法確定蛋白尿是否
-            達標，資料不足（DATA_GAP）；若蛋白尿相關數值皆已測得但未
-            達標，才是資料齊全、確定不符合（BLOCKED）。
+          - eGFR>=60：Stage1/2需蛋白尿(UPCR>=150或糖尿病患UACR>=30)佐證，
+            兩者為「任一達標即算陽性」的OR關係。若已知其中一項達標，
+            資料足夠（已符合）。若尚未達標，必須「每一個可能讓其變陽性
+            的檢驗項目都已測得」才能確定是「真的不符合」而非「還有檢驗
+            沒做」：非糖尿病只需UPCR一項；糖尿病則UPCR與UACR兩項都要
+            測得——只測其中一項且為陰性，另一項仍可能是遺漏的陽性結果，
+            此時仍屬資料不足（DATA_GAP），不可視為確定不符合（BLOCKED）。
+            ★ Codex review 二次驗證發現的修正：先前用 or 判斷「蛋白尿
+            資料是否已知」，導致糖尿病患者只測UPCR或只測UACR其中一項
+            (陰性)、另一項缺測時，被誤判為資料齊全，錯誤歸為BLOCKED。
         """
         if self.egfr is None:
             return True
@@ -219,8 +225,11 @@ class CKDAssessment:
         )
         if proteinuria_positive:
             return False  # 已符合，非缺資料（理論上 stage() 此時不會是 None）
-        proteinuria_known = self.upcr is not None or (self.is_diabetic and self.uacr is not None)
-        return not proteinuria_known
+        if self.upcr is None:
+            return True  # UPCR未測，仍可能是遺漏的陽性結果
+        if self.is_diabetic and self.uacr is None:
+            return True  # 糖尿病患者UACR未測，仍可能是遺漏的陽性結果
+        return False  # 每個可能讓其陽性的項目都已測得且皆未達標，確定不符合
 
 
 # ---------------------------------------------------------------------------

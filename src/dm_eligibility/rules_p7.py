@@ -87,7 +87,10 @@ def check_p4301_eligibility(
             missing.append(
                 MissingReason(
                     MissingReasonKind.DATA_GAP,
-                    "CKD分期評估資料不足，無法判定是否符合Stage1/2/3a(缺eGFR，或eGFR在需蛋白尿佐證之範圍但UPCR/UACR皆缺)",
+                    "CKD分期評估資料不足，無法判定是否符合Stage1/2/3a"
+                    "(缺eGFR，或eGFR在需蛋白尿佐證之範圍但UPCR/UACR未全數測得——"
+                    "糖尿病患須UPCR與UACR皆已測得且皆未達標才能排除，任一項缺測"
+                    "皆可能是遺漏的陽性結果)",
                 )
             )
         else:
