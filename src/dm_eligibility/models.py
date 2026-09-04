@@ -292,9 +292,18 @@ class PatientEnrollmentState:
         return self.count_claims(code) > 0
 
     def last_claim_date(self, codes: str | Sequence[str], before: Optional[date] = None) -> Optional[date]:
+        """回傳指定照護碼中，`before`（含）之前最新一筆申報日期。
+
+        ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：`before`
+        先前用嚴格 `<` 過濾，會讓「同一天已有一筆同代碼申報紀錄」被排除
+        在外——所有呼叫端都是拿這個結果算「距上次申報間隔幾天」，若當天
+        已有一筆申報卻被忽略，會往回找到更早一筆申報來計算天數，可能
+        誤判「間隔已足夠」而允許同一天再次申報同一碼。改為 `<=`，讓
+        「今天已申報過」正確算出0天間隔、擋下同日重複申報。
+        """
         matched = self.claims_of(codes)
         if before is not None:
-            matched = [c for c in matched if c.claim_date < before]
+            matched = [c for c in matched if c.claim_date <= before]
         if not matched:
             return None
         return max(c.claim_date for c in matched)

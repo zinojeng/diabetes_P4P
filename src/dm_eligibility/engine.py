@@ -17,8 +17,9 @@
   照護碼的申報資格」，不負責實際送核申報、不寫回任何資料庫。
 - P14 與 P7 規則實作於 rules_p14.py / rules_p7.py，engine.py 只負責：
   (1) 依序呼叫兩邊的規則函式並彙整結果、
-  (2) 套用「醫師層級」橫向規則（停權、雙重資格）——這些規則不屬於個案
-      狀態機本身，但會影響任一狀態下的可申報性（P14 spec (d) 末段），
+  (2) 套用「醫師層級」橫向規則（停權、P70雙重資格、第二階段醫師資格）——
+      這些規則不屬於個案狀態機本身，但會影響任一狀態下的可申報性
+      （P14 spec (d) 末段、(a) A.5/A.6），
   (3) 標記同一次就診彼此互斥的照護碼組合，交由人工判斷擇一（本引擎刻意
       不自動代為選擇，避免在規格未明確排定優先順序時做出臆測），
   (4) 附掛品質監測(180天強制檢驗排程)這條規格書明文獨立於狀態機之外的
@@ -148,11 +149,32 @@ class EligibilityEngine:
                     )
                     result.missing_requirements.append(dual_qualification_reason)
                     result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, dual_qualification_reason))
+
+            # --- 第二階段(P1410C/P1411C)醫師資格 ---------------------------
+            # 出處：P14 spec (a) A.5：「第二階段照護醫師資格限內科/兒科/
+            # 家醫科/新陳代謝/內分泌/心臟/腎臟專科醫師；非前述指定專科者需
+            # 完成指定學會8小時課程並取得證明；第二階段醫師名單須經分區
+            # 業務組同意」。
+            # ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：
+            # PhysicianStatus.is_stage2_qualified 這個欄位（連同
+            # docs/系統設計說明.md 應介接欄位表中的說明）先前定義了卻從未
+            # 被任何規則讀取，等同完全沒有強制第二階段醫師資格——即使醫師
+            # 不具第二階段資格，P1410C/P1411C 仍會被判定為可收案。比照上面
+            # P70雙重資格的橫向規則寫法補上。
+            if not physician.is_stage2_qualified:
+                for code in ("P1410C", "P1411C"):
+                    result = raw_results[code]
+                    if result.eligible:
+                        result.eligible = False
+                        result.points = None
+                    stage2_reason = f"醫師 {physician.physician_id} 不具第二階段(P1410C/P1411C)照護醫師資格"
+                    result.missing_requirements.append(stage2_reason)
+                    result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, stage2_reason))
         else:
             warnings.append(
                 "未提供醫師資格/停權資訊(physician=None)：本次評估未套用「追蹤率<20%停權」"
-                "「登載不實停權」「P70雙重資格」等醫師層級橫向規則，僅代表個案本身之收案"
-                "資格，實際可否送核申報仍需另行確認醫師資格狀態"
+                "「登載不實停權」「P70雙重資格」「第二階段醫師資格」等醫師層級橫向規則，"
+                "僅代表個案本身之收案資格，實際可否送核申報仍需另行確認醫師資格狀態"
             )
 
         # --- 同一次就診互斥組合標記 -------------------------------------

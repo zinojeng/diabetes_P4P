@@ -114,17 +114,28 @@ def _has_diagnosis_prefix_encounter(state: PatientEnrollmentState, visit_date: d
     return False
 
 
-def _qualifying_dm_visits(state: PatientEnrollmentState, as_of: date, window_days: int = 90) -> list:
+def _qualifying_dm_visits(
+    state: PatientEnrollmentState,
+    as_of: date,
+    config: EligibilityConfig,
+    window_days: int = 90,
+) -> list:
     """回傳 as_of 往前 window_days 天內、以 E08-E13 為診斷之有效就診
     （已排除取消掛號、已排除洗腎相關診別代碼）。
     出處：P14 spec (a) A.1 條件1/2、(c) C.2 條件2/5。
+
+    ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：先前這裡有一段
+    `if e.clinic_type_code is not None: pass` 的死程式碼——註解宣稱「排除
+    洗腎相關診別」，但實際上什麼都沒做，篩選出的就診清單完全沒有排除
+    任何診別代碼，導致90天內就醫次數的計算會把洗腎相關診別的就診也算
+    進去。改為實際比對 config.excluded_clinic_type_codes（與
+    check_p1407_eligibility 對「當次就診」使用的同一份排除清單一致）。
     """
     start = as_of - timedelta(days=window_days)
     visits = []
     for e in state.encounters_within(start, as_of):
-        if e.clinic_type_code is not None:
-            # 排除洗腎相關診別（版本差異見待釐清事項 Q5，config 提供可調整清單）
-            pass
+        if e.clinic_type_code is not None and e.clinic_type_code in config.excluded_clinic_type_codes:
+            continue
         if e.has_diagnosis_prefix(DM_ICD10_PREFIXES, primary_only=False):
             visits.append(e)
     return visits
@@ -154,7 +165,7 @@ def check_p1407_eligibility(
     missing: list[MissingReason] = []
 
     # 條件1：90天內就醫達2次(含)以上，且皆有E08-E13診斷
-    qualifying_visits = _qualifying_dm_visits(state, as_of)
+    qualifying_visits = _qualifying_dm_visits(state, as_of, cfg)
     if len(qualifying_visits) < 2:
         missing.append(
             MissingReason(
@@ -349,7 +360,7 @@ def check_p1408_eligibility(
 
     # 第二階段/P7體系鎖定
     if cfg.lock_stage1_after_stage2_or_p7:
-        lock_date = state.entered_stage2_date or state.entered_p7_date
+        lock_date = _stage1_lock_start_date(state)
         if lock_date is not None and (as_of - lock_date).days < 365:
             missing.append(
                 MissingReason(
@@ -426,14 +437,25 @@ def check_p1409_eligibility(
     else:
         reasons.append(f"{'+'.join(prereq_codes)} 終身累計{lifetime_count}次，達前提門檻")
 
-    year_count = state.count_claims("P1409C", year=as_of.year)  # 本年度計數器，與上面終身計數器分開
-    if year_count > 0:
+    # ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：年度碼
+    # P1409C/P1411C/P7002C 三者互斥、每年僅可擇一（見(a) A.3、P7 spec
+    # P7002-3），先前本函式只檢查P1409C自己是否已報過，未檢查P1411C/
+    # P7002C——若病人當年度已申報P7002C，本函式仍會回傳P1409C.eligible=
+    # True，讓呼叫端誤以為P1409C仍可申報。check_p7002_eligibility已正確
+    # 檢查全部三碼，此處補齊使三者一致（engine.py的互斥警告只在「同時都
+    # eligible=True」時才提醒，不能取代這裡的檢查——否則eligible本身就
+    # 是錯的）。
+    annual_trio_count = state.count_claims(("P1409C", "P1411C", "P7002C"), year=as_of.year)
+    if annual_trio_count > 0:
         missing.append(
-            MissingReason(MissingReasonKind.TIMING, f"本年度P1409C已申報{year_count}次，每年度限1次")
+            MissingReason(
+                MissingReasonKind.TIMING,
+                f"本年度已申報過P1409C/P1411C/P7002C三者之一(共{annual_trio_count}次)，年度碼每年僅可擇一申報1次",
+            )
         )
 
     if cfg.lock_stage1_after_stage2_or_p7:
-        lock_date = state.entered_stage2_date or state.entered_p7_date
+        lock_date = _stage1_lock_start_date(state)
         if lock_date is not None and (as_of - lock_date).days < 365:
             missing.append(
                 MissingReason(
@@ -459,6 +481,21 @@ def check_p1409_eligibility(
         missing_requirements=[r.detail for r in missing],
         missing_reasons=missing,
     )
+
+
+def _stage1_lock_start_date(state: PatientEnrollmentState) -> date | None:
+    """回傳「進入第二階段/P7體系」鎖定P1408C/P1409C的起算日期。
+
+    ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：先前用
+    `state.entered_stage2_date or state.entered_p7_date`，Python的 `or`
+    在左側非None時一律回傳左側——若病人兩個日期皆有值（先進P7、後來也
+    進stage2，或反之），會不分實際先後、固定偏好entered_stage2_date，
+    導致鎖定期間算錯（可能算太早解鎖、也可能算太晚解鎖，取決於哪個
+    日期實際較早）。鎖定的意義是「離開第一階段」，只要兩個路徑之一
+    發生就算離開，應以「較早發生的那個」為準。
+    """
+    dates = [d for d in (state.entered_stage2_date, state.entered_p7_date) if d is not None]
+    return min(dates) if dates else None
 
 
 def check_stage2_entry_eligible(state: PatientEnrollmentState) -> bool:
@@ -534,11 +571,27 @@ def check_p1411_eligibility(
 
     出處：P14 spec (a) A.5：「需P1408C+P1410C累計達3次以上，申報前需距
     最近一次追蹤照護費≥十週」。
+
+    ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：P1411C 與
+    P1410C 同屬第二階段照護碼（見 check_p1410_eligibility 的
+    check_stage2_entry_eligible() 前提檢查），先前本函式漏掉這道
+    「已完整完成第一階段(P1407Cx1+P1408C>=5+P1409C>=2)」的前提檢查——
+    單靠「P1408C+P1410C累計>=3次」本身不足以保證病人已通過第一階段
+    （病人可能只有P1408C x3次、從未有任何P1409C或P1410C申報紀錄，此時
+    仍會被誤判為符合P1411C前提）。
     """
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
     missing: list[MissingReason] = []
+
+    if not check_stage2_entry_eligible(state):
+        missing.append(
+            MissingReason(
+                MissingReasonKind.PREREQUISITE,
+                "尚未完整申報第一階段(P1407Cx1+P1408C>=5+P1409C>=2)，不符合第二階段資格",
+            )
+        )
 
     last_tracking = state.last_claim_date(("P1408C", "P1410C"), before=as_of)
     if last_tracking is None:
@@ -556,8 +609,16 @@ def check_p1411_eligibility(
             MissingReason(MissingReasonKind.PREREQUISITE, f"P1408C+P1410C累計僅{combined}次，需≥3次")
         )
 
-    if state.count_claims("P1411C", year=as_of.year) > 0:
-        missing.append(MissingReason(MissingReasonKind.TIMING, "本年度P1411C已申報過，每年度限1次"))
+    # ★ 修正（同上，CoDoClaw session 轉交之 Codex review 發現）：年度碼
+    # P1409C/P1411C/P7002C 三者互斥，此處先前只檢查P1411C自己。
+    annual_trio_count = state.count_claims(("P1409C", "P1411C", "P7002C"), year=as_of.year)
+    if annual_trio_count > 0:
+        missing.append(
+            MissingReason(
+                MissingReasonKind.TIMING,
+                f"本年度已申報過P1409C/P1411C/P7002C三者之一(共{annual_trio_count}次)，年度碼每年僅可擇一申報1次",
+            )
+        )
 
     eligible = len(missing) == 0
     return EligibilityResult(
@@ -601,17 +662,37 @@ def check_quality_monitoring(
     if not (is_dm_visit and has_a10):
         return []
 
-    four_items = _with_ga_substitute(
+    # ★ 修正（CoDoClaw session 轉交之 Codex review 發現）：「血脂四項」
+    # （總膽固醇/TG/HDL/LDL）是四項各自獨立、缺一不可的檢驗，不是互為
+    # 替代的選項組合。LabRequirement.alternatives 的語意是「清單內任一
+    # 項目有報告即視為滿足」（用於 09006C/09139C 這類真正的替代關係），
+    # 先前把四項血脂檢驗塞進同一個 alternatives tuple，會讓「只測了
+    # 總膽固醇、TG/HDL/LDL都沒測」被誤判成「血脂四項已完成」，漏發本
+    # 該強制排程的警示。四項血脂改為逐項個別檢查(AND)，任一項180天內
+    # 缺報告即在同一筆提示裡列出缺項。
+    non_lipid_items = _with_ga_substitute(
         (
             LabRequirement(("23501C", "23502C"), 180, "NMRP(眼底檢查)"),
             LabRequirement(("09006C",), 180, "HbA1c"),
             LabRequirement(("12111C",), 180, "Mic-Cr(微量白蛋白)"),
-            LabRequirement(("09001C", "09004C", "09043C", "09044C"), 180, "血脂四項"),
         ),
         cfg,
     )
     alerts: list[str] = []
-    for req in four_items:
+    for req in non_lipid_items:
         if state.latest_lab_within(req.alternatives, as_of, req.max_age_days) is None:
             alerts.append(f"強制排程(不可刪除/修改)：{req.description} 180天內未執行")
+
+    lipid_panel_items = (
+        ("09001C", "總膽固醇"),
+        ("09004C", "三酸甘油脂(TG)"),
+        ("09043C", "HDL"),
+        ("09044C", "LDL"),
+    )
+    missing_lipids = [
+        label for code, label in lipid_panel_items if state.latest_lab_within((code,), as_of, 180) is None
+    ]
+    if missing_lipids:
+        alerts.append(f"強制排程(不可刪除/修改)：血脂四項 180天內未執行（缺：{'、'.join(missing_lipids)}）")
+
     return alerts

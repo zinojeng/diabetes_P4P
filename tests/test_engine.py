@@ -35,11 +35,14 @@ from dm_eligibility.rules_p14 import (
     check_p1407_eligibility,
     check_p1408_eligibility,
     check_p1409_eligibility,
+    check_p1410_eligibility,
+    check_p1411_eligibility,
     check_quality_monitoring,
 )
 from dm_eligibility.rules_p7 import (
     check_p4301_eligibility,
     check_p7001_eligibility,
+    check_p7002_eligibility,
     check_p7003_eligibility,
 )
 
@@ -258,7 +261,7 @@ def test_p1409_annual_counter_separate_from_lifetime_counter():
     )
     result = check_p1409_eligibility(state)
     assert result.eligible is False
-    assert any("每年度限1次" in m for m in result.missing_requirements)
+    assert any("年度碼每年僅可擇一申報" in m for m in result.missing_requirements)
     # 終身累計前提本身應已滿足（不是被前提條件擋下，而是被年度上限擋下）
     assert not any("需≥3次" in m for m in result.missing_requirements)
 
@@ -792,3 +795,246 @@ def test_p1407_closure_cooldown_within_1year_is_timing_and_stays_silent():
     assert cooldown_reasons[0].kind == MissingReasonKind.TIMING
     assert result.is_pending_timing_only() is True
     assert result.actionable_missing_reasons() == []
+
+
+# ---------------------------------------------------------------------------
+# 17. 回歸測試：CoDoClaw session 轉交之 Codex review 發現的11個bug
+#     （對CoDoClaw唯讀鏡射之dm_eligibility程式碼所做的review，因兩邊是
+#     同一份程式碼，發現直接適用於本repo）
+# ---------------------------------------------------------------------------
+
+
+def test_p1407_dialysis_clinic_visit_excluded_from_90day_count():
+    """Finding 1修正：先前 _qualifying_dm_visits() 有一段
+    `if e.clinic_type_code is not None: pass` 的死程式碼，完全沒有實際
+    排除洗腎相關診別代碼——導致90天內就醫次數計算會把應排除的診別也
+    算進去。此測試：2次就診，其中1次為排除診別(177)，應只算1次，
+    不足以達成P1407C的「90天內≥2次」前提。"""
+    as_of = date(2026, 4, 1)
+    earlier_visit = as_of - timedelta(days=10)
+    state = base_state(
+        "PAT-DIALYSIS-CLINIC",
+        as_of,
+        encounters=[
+            dm_encounter(earlier_visit, clinic_type_code="177"),  # 排除診別
+            dm_encounter(as_of),
+        ],
+        lab_results=full_p1407_labs(as_of),
+    )
+    result = check_p1407_eligibility(state)
+    assert any("僅1次，需≥2次" in m for m in result.missing_requirements)
+
+
+def test_p4301_prior_visit_window_excludes_enrollment_day_itself():
+    """Finding 2修正：規格書「收案前90天內曾在該院所就醫」的「收案前」
+    代表新收案當次以外的就醫紀錄。先前的90天窗口含as_of當天，若病人
+    只有當次這一筆就診、之前完全沒來過，會被誤判為滿足此前提。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P4301-ONLY-TODAY",
+        as_of,
+        encounters=[ckd_encounter(as_of)],  # 唯一一筆就診即為當次收案就診
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=50.0)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    assert any("收案前90天內查無該院所就醫紀錄" in m for m in result.missing_requirements)
+
+
+def test_p1411_requires_stage1_completion_gate():
+    """Finding 3修正：P1411C（第二階段年度評估碼）先前漏掉
+    check_stage2_entry_eligible()前提檢查——單靠「P1408C+P1410C累計>=3」
+    不足以保證病人真的走完第一階段（可能只有P1408C x3、從未有任何
+    P1409C申報紀錄）。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P1411-NO-STAGE1",
+        as_of,
+        claims=[
+            CodeClaim(code="P1408C", claim_date=date(2025, 1, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 3, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 6, 1)),
+        ],
+    )
+    result = check_p1411_eligibility(state)
+    assert result.eligible is False
+    assert any("尚未完整申報第一階段" in m for m in result.missing_requirements)
+
+
+def test_engine_stage2_physician_qualification_blocks_p1410_p1411():
+    """Finding 4修正：PhysicianStatus.is_stage2_qualified先前完全沒有
+    被任何規則讀取（等同從未強制第二階段醫師資格）。比照P70雙重資格的
+    橫向規則寫法，在engine.py補上。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-STAGE2-DOC",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=date(2024, 1, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2024, 3, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2024, 5, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2024, 7, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2024, 9, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2024, 11, 1)),
+            CodeClaim(code="P1409C", claim_date=date(2024, 6, 1)),
+            CodeClaim(code="P1409C", claim_date=date(2025, 6, 1)),
+        ],
+    )
+    physician = PhysicianStatus(physician_id="DOC-NO-STAGE2", is_stage2_qualified=False)
+    engine = EligibilityEngine()
+    report = engine.evaluate(state, physician=physician)
+
+    for code in ("P1410C", "P1411C"):
+        result = report.get(code)
+        assert result is not None
+        assert result.eligible is False
+        assert result.missing_requirements == [r.detail for r in result.missing_reasons]
+        stage2_reasons = [r for r in result.missing_reasons if "第二階段" in r.detail and "醫師資格" in r.detail]
+        assert len(stage2_reasons) == 1
+        assert stage2_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+def test_p1409_blocked_when_p1411_already_claimed_this_year():
+    """Finding 5修正：年度碼P1409C/P1411C/P7002C三者互斥，先前
+    check_p1409_eligibility只檢查P1409C自己是否已報過，未檢查另外兩碼。
+    此測試改用P1411C（而非既有測試已涵蓋的P7002C），確保對稱性完整。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P1409-VS-P1411",
+        as_of,
+        claims=[CodeClaim(code="P1411C", claim_date=date(2026, 2, 1))],
+    )
+    result = check_p1409_eligibility(state)
+    assert result.eligible is False
+    assert any("P1409C/P1411C/P7002C" in m for m in result.missing_requirements)
+
+
+def test_p1411_blocked_when_p1409_already_claimed_this_year():
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P1411-VS-P1409",
+        as_of,
+        claims=[CodeClaim(code="P1409C", claim_date=date(2026, 2, 1))],
+    )
+    result = check_p1411_eligibility(state)
+    assert result.eligible is False
+    assert any("P1409C/P1411C/P7002C" in m for m in result.missing_requirements)
+
+
+def test_p1408_lock_date_uses_earlier_of_stage2_and_p7_entry():
+    """Finding 6修正：先前 `entered_stage2_date or entered_p7_date` 用
+    Python的or運算子，只要entered_stage2_date非None就一律優先採用，不論
+    entered_p7_date是否較早。此測試：entered_p7_date早於entered_stage2_
+    date，鎖定應以較早的entered_p7_date為準（此時已過1年，鎖定應已解除）；
+    若bug仍在（誤用entered_stage2_date，較晚），鎖定會被誤判為仍然生效。"""
+    as_of = date(2026, 4, 1)
+    p1407_date = date(2020, 1, 1)
+    last_p1408 = as_of - timedelta(days=100)  # 間隔已足夠，不受70天間隔影響
+    state = base_state(
+        "PAT-LOCK-DATE-ORDER",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=p1407_date),
+            CodeClaim(code="P1408C", claim_date=last_p1408),
+        ],
+        lab_results=full_p1408_labs(as_of),
+        entered_p7_date=as_of - timedelta(days=400),  # 較早，已超過1年
+        entered_stage2_date=as_of - timedelta(days=100),  # 較晚，未滿1年
+    )
+    result = check_p1408_eligibility(state)
+    # 正確行為：以較早的entered_p7_date(400天前)為準，鎖定已解除，不應
+    # 出現「1年內不得再申報P1408C」的訊息。
+    assert not any("第二階段/P7體系" in m for m in result.missing_requirements)
+
+
+def test_p1408_same_day_claim_blocks_duplicate_interval_check():
+    """Finding 7修正：models.last_claim_date()先前用嚴格`<`過濾`before`
+    參數，會讓「今天已有一筆同代碼申報紀錄」被排除在外，導致往回找到
+    更早一筆申報來計算天數、誤判「間隔已足夠」而允許同一天重複申報。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-SAME-DAY-CLAIM",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=date(2026, 1, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2026, 1, 20)),
+            CodeClaim(code="P1408C", claim_date=as_of),  # 今天已申報過一次
+        ],
+    )
+    result = check_p1408_eligibility(state)
+    assert result.eligible is False
+    assert any("僅0天" in m for m in result.missing_requirements)
+
+
+def test_p7001_second_claim_this_year_only_requires_ldl_and_cr():
+    """Finding 9修正（依 spec/P7_rules_spec.md (d) 節「檢驗報告日期規範
+    （依批碼分次要求不同）」）：P700101(第1次)只需B.S+HbA1C、
+    P700102(第2次)只需LDL+Cr、P700103(第3次)只需UACR——先前不分次數，
+    每次都要求備齊全部5項。此測試：當年度第2次申報，只有LDL+Cr有報告
+    （缺B.S/HbA1C/UACR），應視為檢驗齊全。"""
+    enroll_date = date(2026, 1, 1)
+    first_p7001_date = enroll_date + timedelta(days=49)
+    as_of = first_p7001_date + timedelta(days=70)  # 與first_p7001_date同一年
+    state = base_state(
+        "PAT-P7001-2ND-CLAIM",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=enroll_date),
+            CodeClaim(code="P4301C", claim_date=enroll_date),
+            CodeClaim(code="P7001C", claim_date=first_p7001_date),
+        ],
+        lab_results=[
+            LabResult(item_code="09044C", result_date=as_of),  # LDL
+            LabResult(item_code="09015C", result_date=as_of),  # Cr
+        ],
+    )
+    result = check_p7001_eligibility(state)
+    assert result.eligible is True
+
+
+def test_p7002_accepts_06013c_as_ur_alternative_to_12111c():
+    """Finding 10修正：P7002C規格書明文「Mic/Cr及U/R(二擇一)」，先前
+    alternatives只放了12111C(Mic/Cr)一項，沒有真正允許06013C(U/R，尿液
+    分析)作為替代——「二擇一」的描述文字與實際檢查邏輯不一致。此測試只
+    提供06013C(不提供12111C)，應仍視為此項檢驗已滿足。"""
+    as_of = date(2026, 4, 1)
+    p7002_labs_via_ur = [
+        LabResult(item_code=c, result_date=as_of)
+        for c in ("09005C", "09006C", "09026C", "09004C", "09001C", "09044C", "09043C", "09015C")
+    ] + [
+        LabResult(item_code="06013C", result_date=as_of),  # U/R替代Mic/Cr(12111C)
+        LabResult(item_code="23501C", result_date=as_of),
+    ]
+    state = base_state(
+        "PAT-P7002-UR-ALT",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=date(2025, 1, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 3, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 6, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 9, 1)),
+            CodeClaim(code="P1408C", claim_date=date(2025, 12, 1)),
+        ],
+        lab_results=p7002_labs_via_ur,
+    )
+    result = check_p7002_eligibility(state)
+    assert not any("Mic/Cr" in m for m in result.missing_requirements)
+
+
+def test_quality_monitoring_lipid_panel_requires_all_four_items():
+    """Finding 11修正：血脂四項(總膽固醇/TG/HDL/LDL)是四項各自獨立、
+    缺一不可的檢驗，先前塞進同一個LabRequirement.alternatives(OR語意)，
+    導致「只測了總膽固醇」被誤判成「血脂四項已完成」。此測試：只有
+    總膽固醇(09001C)有報告，TG/HDL/LDL皆缺，應觸發血脂四項警示。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-LIPID-PARTIAL",
+        as_of,
+        encounters=[dm_encounter(as_of)],
+        lab_results=[LabResult(item_code="09001C", result_date=as_of)],
+    )
+    alerts = check_quality_monitoring(state)
+    assert any("血脂四項" in a for a in alerts)
+    lipid_alert = next(a for a in alerts if "血脂四項" in a)
+    assert "三酸甘油脂" in lipid_alert and "HDL" in lipid_alert and "LDL" in lipid_alert
+    assert "總膽固醇" not in lipid_alert.split("缺：")[1]  # 已有報告的項目不應出現在缺項清單裡
