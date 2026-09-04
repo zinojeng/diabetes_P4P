@@ -76,8 +76,24 @@ def check_p4301_eligibility(
     if state.ckd_assessments:
         latest_assessment = max(state.ckd_assessments, key=lambda a: a.assessment_date)
 
-    if latest_assessment is None or latest_assessment.stage() is None:
-        missing.append(MissingReason(MissingReasonKind.DATA_GAP, "查無符合Stage1/2/3a條件之CKD分期評估資料(eGFR/UPCR/UACR)"))
+    if latest_assessment is None:
+        missing.append(MissingReason(MissingReasonKind.DATA_GAP, "查無CKD分期評估資料(eGFR/UPCR/UACR)"))
+    elif latest_assessment.stage() is None:
+        # ★ Codex review 發現的分類錯誤修正：stage()==None 同時涵蓋「資料
+        # 不足以判定」與「資料已齊全但不符合Stage1/2/3a」兩種情形，不可
+        # 一律歸為DATA_GAP（後者屬確定排除，應為BLOCKED，否則背景流程會
+        # 誤協助安排本就不需要的追加檢驗）。見 CKDAssessment.data_incomplete()。
+        if latest_assessment.data_incomplete():
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.DATA_GAP,
+                    "CKD分期評估資料不足，無法判定是否符合Stage1/2/3a(缺eGFR，或eGFR在需蛋白尿佐證之範圍但UPCR/UACR皆缺)",
+                )
+            )
+        else:
+            missing.append(
+                MissingReason(MissingReasonKind.BLOCKED, "CKD分期評估資料齊全，但不符合Stage1/2/3a條件")
+            )
     else:
         reasons.append(f"CKD分期評估符合Stage{latest_assessment.stage()}")
 
@@ -299,16 +315,27 @@ def check_p7003_eligibility(
     latest_assessment = None
     if state.ckd_assessments:
         latest_assessment = max(state.ckd_assessments, key=lambda a: a.assessment_date)
-    referral_indicated = False
-    if latest_assessment is not None:
-        if latest_assessment.upcr is not None and latest_assessment.upcr >= 1000:
-            referral_indicated = True
-        if latest_assessment.egfr is not None and latest_assessment.egfr < 45:
-            referral_indicated = True
-    if not referral_indicated:
-        missing.append(MissingReason(MissingReasonKind.BLOCKED, "未符合轉診條件(UPCR>=1000或eGFR<45)"))
+    # ★ Codex review 發現的分類錯誤修正：原本 referral_indicated 預設
+    # False，「查無評估資料」與「評估資料齊全但確定未達轉診條件」都會被
+    # 歸為同一個BLOCKED訊息——前者其實是缺檢驗(DATA_GAP)，不是確定排除。
+    if latest_assessment is None:
+        missing.append(MissingReason(MissingReasonKind.DATA_GAP, "查無CKD評估資料(UPCR/eGFR)，無法判定是否符合轉診條件"))
     else:
-        reasons.append("符合轉診條件(UPCR>=1000或eGFR<45)")
+        upcr_qualifies = latest_assessment.upcr is not None and latest_assessment.upcr >= 1000
+        egfr_qualifies = latest_assessment.egfr is not None and latest_assessment.egfr < 45
+        if upcr_qualifies or egfr_qualifies:
+            reasons.append("符合轉診條件(UPCR>=1000或eGFR<45)")
+        elif latest_assessment.upcr is None or latest_assessment.egfr is None:
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.DATA_GAP,
+                    "UPCR或eGFR資料不全，無法確定是否符合轉診條件(UPCR>=1000或eGFR<45)",
+                )
+            )
+        else:
+            missing.append(
+                MissingReason(MissingReasonKind.BLOCKED, "UPCR與eGFR資料齊全，但未達轉診條件(UPCR>=1000或eGFR<45)")
+            )
 
     if state.pre_esrd_referral_confirmed is None:
         missing.append(MissingReason(MissingReasonKind.BLOCKED, "Pre-ESRD計畫收案確認狀態未知，需人工查證後方可判斷"))

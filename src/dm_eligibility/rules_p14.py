@@ -91,7 +91,9 @@ def check_lab_requirements(
     state: PatientEnrollmentState, requirements: tuple[LabRequirement, ...], as_of: date
 ) -> tuple[bool, list[MissingReason]]:
     """檢查一組 LabRequirement 是否皆已於各自窗口內滿足。回傳
-    (是否全數滿足, 缺漏項目描述清單)。"""
+    (是否全數滿足, 缺漏項目清單)——第二個元素是 MissingReason 物件的
+    清單（每項含 kind=DATA_GAP 與 detail 描述字串），不是純字串清單；
+    需要純字串時請用 `[r.detail for r in missing]`。"""
     missing: list[MissingReason] = []
     for req in requirements:
         found = state.latest_lab_within(req.alternatives, as_of, req.max_age_days)

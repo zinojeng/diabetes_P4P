@@ -194,6 +194,34 @@ class CKDAssessment:
             return "3a"
         return None
 
+    def data_incomplete(self) -> bool:
+        """True 表示 `stage()` 回傳 None 是因為「資料不足以判定」，而非
+        「資料已齊全、確定不符合Stage1/2/3a」——呼叫端據此決定要分類為
+        DATA_GAP（協助安排補做檢驗）還是 BLOCKED（確定不符合，非缺資料）。
+
+        ★ 工程補充判斷，非規格書逐字條文：
+          - 缺eGFR：資料不足（DATA_GAP）。
+          - eGFR<45：Stage3a門檻(45~59.9)以下，資料已足以判定不符合
+            （BLOCKED）——即使蛋白尿資料也缺，eGFR本身已排除Stage1/2/3a。
+          - 45<=eGFR<60：Stage3a只看eGFR，不需蛋白尿佐證，資料已足夠
+            （不會是data_incomplete，此時必為符合）。
+          - eGFR>=60：Stage1/2需蛋白尿(UPCR>=150或糖尿病患UACR>=30)佐證；
+            若UPCR缺、且(非糖尿病 或 UACR缺)，代表無法確定蛋白尿是否
+            達標，資料不足（DATA_GAP）；若蛋白尿相關數值皆已測得但未
+            達標，才是資料齊全、確定不符合（BLOCKED）。
+        """
+        if self.egfr is None:
+            return True
+        if self.egfr < 60:
+            return False  # <45或45~59.9：Stage3a判定僅需eGFR，資料已足夠
+        proteinuria_positive = (self.upcr is not None and self.upcr >= 150) or (
+            self.is_diabetic and self.uacr is not None and self.uacr >= 30
+        )
+        if proteinuria_positive:
+            return False  # 已符合，非缺資料（理論上 stage() 此時不會是 None）
+        proteinuria_known = self.upcr is not None or (self.is_diabetic and self.uacr is not None)
+        return not proteinuria_known
+
 
 # ---------------------------------------------------------------------------
 # 彙整病人狀態
@@ -336,8 +364,11 @@ class MissingReasonKind(str, Enum):
     # 這是完全正常的排程狀態，會隨時間/下個年度自動解除，背景自動化流程
     # 應保持靜默，不通知、不中斷照護流程。
     DATA_GAP = "data_gap"
-    # 缺檢驗/評估資料——背景自動化流程可考慮據此協助安排/開立所需檢驗
-    # 項目（見 diabetes_P4P repo README〈架構與缺口〉分支B的討論）。
+    # 缺檢驗/評估資料，或現有資料不足以判定是否符合條件（例如某個判定
+    # 門檻需要兩項數值佐證、目前只測得一項）——背景自動化流程可考慮據此
+    # 協助安排/開立所需檢驗項目（見 diabetes_P4P repo README〈架構與缺口〉
+    # 分支C的討論；注意「資料不足」與「資料齊全但確定不符合」需分開判斷，
+    # 後者應歸為BLOCKED，見 rules_p7.check_p4301_eligibility 的示範）。
     PREREQUISITE = "prerequisite"
     # 前置照護碼、累計就醫次數或累計申報次數尚未達成——需先完成前一階段
     # 才能繼續，非本次就診當下可單獨解決，但通常值得個管人員留意進度。

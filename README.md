@@ -1,6 +1,6 @@
 # 糖尿病 P14 / P7 品質支付收案資格判斷引擎
 
-**一句話說明**：P4P 健保品質支付的設計精神是儘量不干擾醫療照護行為——這個引擎是「背景自動化流程」該有的判斷核心：靜默讀取一位病人的就診/檢驗/收案歷史，逐條檢查健保 P14/P7 品質支付照護碼的收案條件；已符合的，外層系統可以此為依據自動完成收案、不驚動醫師，只有真的缺項時（缺檢驗、天數未到、次數已達上限……）才逐條列出並附上規格出處，交由外層系統通知醫師或協助安排所需檢驗。
+**一句話說明**：P4P 健保品質支付的設計精神是儘量不干擾醫療照護行為——這個引擎是「背景自動化流程」該有的判斷核心：靜默讀取一位病人的就診/檢驗/收案歷史，逐條檢查健保 P14/P7 品質支付照護碼的收案條件；已符合的，外層系統可以此為依據自動完成收案、不驚動醫師；「天數未到、次數已達上限」這類純排程等待狀態，保持完全靜默、不通知任何人；只有真正值得處理的缺項時（例如缺檢驗、需人工查證的排除條件）才逐條列出，交由外層系統通知醫師或協助安排所需檢驗——各項規則本身的規格出處記錄在程式碼註解與 `spec/` 規格書中，`MissingReason` 物件本身只帶 `kind`（分類）與 `detail`（描述），不含規格章節引用。
 
 本專案把童綜合醫院糖尿病品質支付方案 **P14**（糖尿病照護管理，
 P1407C/P1408C/P1409C/P1410C/P1411C）與 **P7**（糖尿病合併初期慢性腎臟病
@@ -149,7 +149,7 @@ sys.path.insert(0, "src")  # 或將 src/ 加入 PYTHONPATH / 安裝為套件
 
 from datetime import date
 from dm_eligibility.engine import EligibilityEngine
-from dm_eligibility.models import PatientEnrollmentState, Encounter, DiagnosisRecord
+from dm_eligibility.models import PatientEnrollmentState, Encounter, DiagnosisRecord, PhysicianStatus
 
 state = PatientEnrollmentState(
     patient_id="P0001",
@@ -165,9 +165,13 @@ state = PatientEnrollmentState(
     vpn_other_institution_enrolled=False,
     age_years=60,
 )
+# physician 必須提供才會套用停權/P70雙重資格等橫向規則；physician=None時
+# eligible=True 只代表「個案本身」符合資格，report.warnings 會明確提醒
+# 尚未檢查醫師層級規則、不可直接視為可送核申報。
+physician = PhysicianStatus(physician_id="DOC1")
 
 engine = EligibilityEngine()
-report = engine.evaluate(state)
+report = engine.evaluate(state, physician=physician)
 for result in report.results:
     if result.eligible:
         print(result.code, "eligible — 可自動收案", result.points)

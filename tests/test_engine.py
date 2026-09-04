@@ -37,7 +37,11 @@ from dm_eligibility.rules_p14 import (
     check_p1409_eligibility,
     check_quality_monitoring,
 )
-from dm_eligibility.rules_p7 import check_p7001_eligibility
+from dm_eligibility.rules_p7 import (
+    check_p4301_eligibility,
+    check_p7001_eligibility,
+    check_p7003_eligibility,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -559,3 +563,116 @@ def test_engine_flags_mutual_exclusion_between_annual_codes():
         # 若因資料條件差異兩者未同時成立，至少確認引擎沒有拋出例外，
         # 且未自動核准超過年度上限的重複年度碼。
         assert True
+
+
+# ---------------------------------------------------------------------------
+# 14. P4301C：CKD分期「資料不足」vs「資料齊全但不符合」的分類
+#     （回歸測試——Codex review 發現的分類錯誤：原本 stage()==None 一律
+#     歸為DATA_GAP，會讓「資料齊全、確定不符合」的個案也被當成缺檢驗，
+#     背景流程可能因此誤協助安排本就不需要的追加檢驗）
+# ---------------------------------------------------------------------------
+
+
+def test_p4301_ckd_no_assessment_at_all_is_data_gap():
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-NO-ASSESSMENT",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.DATA_GAP
+
+
+def test_p4301_ckd_egfr_in_qualifying_range_but_proteinuria_missing_is_data_gap():
+    """eGFR=70（落在60~89.9區間，屬Stage2候選範圍）但UPCR/UACR皆缺——
+    無法確定是否符合蛋白尿條件，屬「資料不足」而非「確定不符合」。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-PROTEINURIA-UNKNOWN",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=None, uacr=None, is_diabetic=True)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.DATA_GAP
+
+
+def test_p4301_ckd_egfr_below_stage3a_threshold_is_blocked_not_data_gap():
+    """eGFR=30，明確低於Stage3a門檻(45~59.9)——資料已齊全，確定不符合
+    Stage1/2/3a，應分類為BLOCKED，不應被當成缺檢驗(DATA_GAP)。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-BELOW-STAGE3A",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=30.0, upcr=500.0, is_diabetic=False)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+def test_p4301_ckd_proteinuria_measured_but_below_threshold_is_blocked():
+    """eGFR=70(合格區間)，UPCR/UACR皆已測得但未達門檻——資料齊全、確定
+    不符合，應分類為BLOCKED，不應被當成缺檢驗(DATA_GAP)。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-PROTEINURIA-NEGATIVE",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=50.0, uacr=10.0, is_diabetic=True)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# 15. P7003C：轉診條件「資料不足」vs「資料齊全但未達標」的分類
+#     （回歸測試——Codex review 發現的分類錯誤：原本 referral_indicated
+#     預設False，缺評估資料與確定未達轉診條件會被歸為同一個BLOCKED訊息）
+# ---------------------------------------------------------------------------
+
+
+def test_p7003_referral_condition_data_gap_when_no_ckd_assessment():
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P7003-NO-ASSESSMENT",
+        as_of,
+        claims=[CodeClaim(code="P4301C", claim_date=as_of - timedelta(days=100))],
+        ckd_assessments=[],
+        pre_esrd_referral_confirmed=True,
+    )
+    result = check_p7003_eligibility(state)
+    assert result.eligible is False
+    referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
+    assert len(referral_reasons) == 1
+    assert referral_reasons[0].kind == MissingReasonKind.DATA_GAP
+
+
+def test_p7003_referral_condition_blocked_when_data_complete_but_not_indicated():
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-P7003-NOT-INDICATED",
+        as_of,
+        claims=[CodeClaim(code="P4301C", claim_date=as_of - timedelta(days=100))],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=60.0, upcr=100.0, is_diabetic=False)],
+        pre_esrd_referral_confirmed=True,
+    )
+    result = check_p7003_eligibility(state)
+    assert result.eligible is False
+    referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
+    assert len(referral_reasons) == 1
+    assert referral_reasons[0].kind == MissingReasonKind.BLOCKED

@@ -120,9 +120,15 @@ class EligibilityEngine:
                         result.points = None
                     # ★ 修正：先前只 append 到 missing_requirements（純字串
                     # 清單），未同步 append 到 missing_reasons，會讓兩份清單
-                    # 內容不同步、且這筆理由完全沒有分類——「醫師停權」需要
-                    # 人工查證/處理，分類為 BLOCKED（不可能隨時間自動解除，
-                    # 需要有人介入排除停權狀態）。
+                    # 內容不同步、且這筆理由完全沒有分類。分類為 BLOCKED：
+                    # 停權雖有明訂到期日（PhysicianStatus.tracking_rate_
+                    # suspended_until/falsification_suspended_until，屆期後
+                    # suspension_reason() 會自動回傳 None），並非「需要人工
+                    # 排除」——但停權本身是需要被看見的行政狀態（見
+                    # docs/系統設計說明.md／Codex review：是否該歸TIMING、
+                    # 讓背景流程對「仍在停權中」保持靜默，屬於待與院內個管
+                    # /品管端確認的routing判斷，非本引擎能片面決定，暫維持
+                    # BLOCKED的保守選擇，即「至少要有人看到」）。
                     result.missing_requirements.append(suspension_reason)
                     result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, suspension_reason))
 
