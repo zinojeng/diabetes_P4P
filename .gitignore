@@ -6,11 +6,6 @@ dm_p4p/630125684509638912_OS99-申請P1407糖尿病診斷自動列為主診斷-1
 # them carries the same embedded patient screenshot as the file excluded above.
 dm_p4p/original files pdf doc/
 
-# Part 2（臨床決策支援管線，dm_care_pipeline）已獨立拆分至專屬 repo
-# https://github.com/zinojeng/CoDoClaw.git ——本 repo（diabetes_P4P）只保留
-# Part 1（P14/P7 收案資格判斷引擎，dm_eligibility），避免兩個 repo 內容
-# 混雜。這些檔案已從本機工作目錄移除，實際內容以 CoDoClaw repo 為準。
-
 # Local tooling / build artifacts
 .metadata_cache/
 .pytest_cache/
