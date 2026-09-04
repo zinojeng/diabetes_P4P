@@ -43,6 +43,8 @@ from .models import (
     EligibilityConfig,
     EligibilityReport,
     EligibilityResult,
+    MissingReason,
+    MissingReasonKind,
     PatientEnrollmentState,
     PhysicianStatus,
 )
@@ -116,7 +118,13 @@ class EligibilityEngine:
                     if result.eligible:
                         result.eligible = False
                         result.points = None
+                    # ★ 修正：先前只 append 到 missing_requirements（純字串
+                    # 清單），未同步 append 到 missing_reasons，會讓兩份清單
+                    # 內容不同步、且這筆理由完全沒有分類——「醫師停權」需要
+                    # 人工查證/處理，分類為 BLOCKED（不可能隨時間自動解除，
+                    # 需要有人介入排除停權狀態）。
                     result.missing_requirements.append(suspension_reason)
+                    result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, suspension_reason))
 
             # --- P7 系列醫師雙重資格 ------------------------------------
             # 出處：P7 spec (a) doc2-p70-doctor-eligibility：「符合可帶入
@@ -127,9 +135,11 @@ class EligibilityEngine:
                     if result.eligible:
                         result.eligible = False
                         result.points = None
-                    result.missing_requirements.append(
+                    dual_qualification_reason = (
                         f"醫師 {physician.physician_id} 不具P70系列所需之DM+初腎雙重資格"
                     )
+                    result.missing_requirements.append(dual_qualification_reason)
+                    result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, dual_qualification_reason))
         else:
             warnings.append(
                 "未提供醫師資格/停權資訊(physician=None)：本次評估未套用「追蹤率<20%停權」"

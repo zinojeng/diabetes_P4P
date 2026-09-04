@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from typing import Iterable, Optional, Sequence
 
 
@@ -317,6 +318,46 @@ class LabRequirement:
     description: str
 
 
+class MissingReasonKind(str, Enum):
+    """`EligibilityResult.missing_reasons` 每一項缺項的分類。
+
+    設計動機：P4P 健保品質支付的精神是儘量不干擾醫療照護行為——一個以
+    本引擎驅動的背景自動化流程，理想上應該「符合條件就靜默完成收案，
+    只有真的缺項時才通知醫師或協助安排」。但 `missing_requirements` 這份
+    純字串清單，長期把「距上次申報僅10天，未滿70天」這種完全正常、
+    每天都會發生、什麼都不用做的排程狀態，跟「缺HbA1c檢驗」這種真正
+    需要處理的缺項混在一起——若背景流程天真地對任何非空 missing_
+    requirements 都發出通知，等於每天對每位病人洗版通知「還沒到期」，
+    這正是規格精神想避免的干擾。本列舉讓呼叫端可以篩選掉純排程狀態。
+    """
+
+    TIMING = "timing"
+    # 時間間隔/年度次數上限尚未到、或已收案且尚未結案（重複收案被擋）——
+    # 這是完全正常的排程狀態，會隨時間/下個年度自動解除，背景自動化流程
+    # 應保持靜默，不通知、不中斷照護流程。
+    DATA_GAP = "data_gap"
+    # 缺檢驗/評估資料——背景自動化流程可考慮據此協助安排/開立所需檢驗
+    # 項目（見 diabetes_P4P repo README〈架構與缺口〉分支B的討論）。
+    PREREQUISITE = "prerequisite"
+    # 前置照護碼、累計就醫次數或累計申報次數尚未達成——需先完成前一階段
+    # 才能繼續，非本次就診當下可單獨解決，但通常值得個管人員留意進度。
+    BLOCKED = "blocked"
+    # 排除條件命中，或需要人工查證/確認（VPN他院收案查核、Pre-ESRD轉診
+    # 確認、年齡、主診斷、用藥、掛號診別、結案排除等）——需要醫師或個管
+    # 人員做判斷/確認，不會隨時間自動解除。
+
+
+@dataclass(frozen=True)
+class MissingReason:
+    """單一缺項的分類版本。`kind=TIMING` 時，背景自動化流程應保持完全
+    靜默；其餘三類至少值得讓某個角色（個管/醫師）看到，實際要通知誰、
+    是否可自動協助開立，routing 細節留給呼叫端決定——本引擎只負責分類，
+    不做任何通知/開立動作（鐵律：判斷與動作分離）。"""
+
+    kind: MissingReasonKind
+    detail: str
+
+
 @dataclass
 class EligibilityResult:
     """單一照護碼的資格判斷結果。"""
@@ -326,6 +367,28 @@ class EligibilityResult:
     points: Optional[int] = None
     reasons: list[str] = field(default_factory=list)
     missing_requirements: list[str] = field(default_factory=list)
+    # 新增：`missing_requirements` 的分類版本，內容與其一一對應（同序、
+    # 同長度，`missing_requirements[i] == missing_reasons[i].detail`）——
+    # 舊呼叫端讀 `missing_requirements` 完全不受影響，新呼叫端可用
+    # `missing_reasons`/`actionable_missing_reasons()`/
+    # `is_pending_timing_only()` 判斷是否該中斷照護流程。
+    missing_reasons: list[MissingReason] = field(default_factory=list)
+
+    def actionable_missing_reasons(self) -> list[MissingReason]:
+        """排除 `kind=TIMING`（排程正常等待）的缺項——背景自動化流程應
+        據此判斷是否需要通知醫師/協助開立，而非對每一筆「還沒到期」都
+        中斷照護流程。"""
+        return [r for r in self.missing_reasons if r.kind != MissingReasonKind.TIMING]
+
+    def is_pending_timing_only(self) -> bool:
+        """`eligible=False`，但缺項全部只是排程/次數尚未到（無其他真正
+        需要處理的缺項）。背景自動化流程遇到這個狀態時應保持完全靜默，
+        不通知任何人——這是本次資料模型擴充要解決的核心問題。"""
+        return (
+            not self.eligible
+            and bool(self.missing_reasons)
+            and all(r.kind == MissingReasonKind.TIMING for r in self.missing_reasons)
+        )
 
 
 @dataclass

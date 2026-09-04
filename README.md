@@ -17,9 +17,13 @@ P1407C/P1408C/P1409C/P1410C/P1411C）與 **P7**（糖尿病合併初期慢性腎
   從現有文件確定的「待釐清事項」會明確標記，並記錄程式目前採用的
   保守預設處理方式——不靜默臆測。
 - ✅ 是：一個設計來**被自動化流程呼叫**的判斷核心——`evaluate()` 回傳的
-  `eligible: bool` + `missing_requirements: list[str]` 正是驅動「靜默
-  自動收案」vs「中斷通知醫師/協助開立檢驗」這兩條分支所需的全部資訊，
-  外層排程系統可直接依此決定要不要打斷照護流程。
+  `eligible: bool` + `missing_reasons: list[MissingReason]`（每項附
+  `kind` 分類：`TIMING`/`DATA_GAP`/`PREREQUISITE`/`BLOCKED`）正是驅動
+  「靜默自動收案」vs「中斷通知醫師/協助開立檢驗」這兩條分支所需的全部
+  資訊——`result.is_pending_timing_only()` 明確告訴呼叫端「這只是還沒到
+  期，什麼都不用做」，`result.actionable_missing_reasons()` 篩掉純排程
+  等待、只留下真正值得處理的缺項，外層排程系統可直接依此決定要不要打斷
+  照護流程，不會被「還沒到期」這種每天都會發生的正常狀態洗版。
 - ❌ 不是：會自己動手的自動化系統。**本 repo 目前只有「判斷」這一層，
   沒有「動作」這一層**——沒有背景排程、沒有自動送出申報的呼叫、也沒有
   自動開立檢驗醫令的呼叫。實際的排程觸發、健保申報 API、CPOE 開立檢驗，
@@ -36,20 +40,32 @@ P4P 專案「儘可能不干擾醫療照護行為」的目標，具體展開是�
 （每次就診/檢驗結果回存時，  →  EligibilityEngine.evaluate()   →  分支 A：eligible=True 且尚未
  或每日批次掃描）               → EligibilityReport                       申報 → 靜默自動送出申報
                                    .results[i].eligible: bool             （不驚動醫師）
-                                   .results[i].missing_requirements       分支 B：eligible=False
-                                   .quality_monitoring_alerts             → 通知醫師，或依
-                                                                             missing_requirements
-                                                                             協助開立所需檢驗醫令
+                                   .results[i].missing_reasons            分支 B：is_pending_timing_
+                                     [{kind, detail}, ...]                  only()=True → 保持靜默，
+                                   .results[i].is_pending_timing_only()     什麼都不做（不驚動醫師）
+                                   .results[i].actionable_missing_        分支 C：actionable_missing_
+                                     reasons()                              reasons() 非空 → 通知醫師，
+                                   .quality_monitoring_alerts               kind=DATA_GAP 者可考慮協助
+                                                                             開立所需檢驗醫令
 ```
 
 **① 背景排程觸發**——目前不存在。需要決定：由 HIS 在每次就診/檢驗結果
 寫回時同步呼叫（事件驅動），還是每日批次掃描在院病人（排程驅動）；本
 repo 不預設任何一種，因為這屬於院內系統架構決策。
 
-**② 本 repo：判斷**——已完整實作且有測試覆蓋。`EligibilityEngine.
-evaluate(state, physician)` 是唯一入口，純函式、無副作用、不呼叫任何
-外部系統；`EligibilityReport.eligible_codes()` 給分支 A 用，各
-`EligibilityResult.missing_requirements` 給分支 B 用。
+**② 本 repo：判斷**——已完整實作且有測試覆蓋（16 個測試）。
+`EligibilityEngine.evaluate(state, physician)` 是唯一入口，純函式、無
+副作用、不呼叫任何外部系統；`EligibilityReport.eligible_codes()` 給
+分支 A 用。分支 B/C 的判斷曾經是本節的一個已知缺口——`missing_
+requirements` 舊版是純字串清單，「距上次申報僅10天，未滿70天」這種
+完全正常、每天都會發生的排程狀態，跟「缺HbA1c檢驗」這種真正需要處理的
+缺項混在一起，天真地「非空即通知」會對每位病人每天洗版。現已改用
+`EligibilityResult.missing_reasons: list[MissingReason]`（每項有
+`kind: TIMING|DATA_GAP|PREREQUISITE|BLOCKED`），`is_pending_timing_
+only()` 對應分支 B（純排程等待，保持靜默），`actionable_missing_
+reasons()` 對應分支 C（值得通知/協助處理），其中 `kind=DATA_GAP` 是
+「協助開立所需檢驗」的直接候選。舊的 `missing_requirements: list[str]`
+欄位保留、內容與順序完全不變，向下相容既有呼叫端。
 
 **③ 外層系統：動作**——目前不存在，也**刻意不在本 repo 範圍內**：本
 repo 沒有健保申報 API 的知識，也沒有院內 CPOE 開立檢驗醫令的介面資訊，
@@ -58,16 +74,17 @@ repo 沒有健保申報 API 的知識，也沒有院內 CPOE 開立檢驗醫令�
 介接規格的團隊另行開發，串接時直接消費 `EligibilityReport` 即可，不需
 重新判斷資格。
 
-若要推進到分支 A/B 實際自動執行，需要的下一步（非本 repo 目前工作範圍，
-待與院內資訊室確認介接規格後才能設計）：
+若要推進到分支 A/C 實際自動執行，需要的下一步（非本 repo 目前工作範圍，
+待與院內資訊室確認介接規格後才能設計；分支 B 不需要外接任何系統，呼叫端
+只要檢查 `is_pending_timing_only()` 就能正確保持靜默）：
 1. 決定排程觸發方式（事件驅動 or 批次），並決定失敗重試/監控機制。
 2. 分支 A（自動申報）：確認健保申報 API 的呼叫方式與失敗處理，並決定
    是否仍要保留人工覆核步驟（例如先落地一筆「待送出」紀錄，由個管師
    批次確認後才真正送出，而非完全無人審閱）。
-3. 分支 B（通知/協助開立檢驗）：確認要用什麼管道通知醫師（HIS 內建
-   訊息/院內 App/其他），以及「協助開立」是指跳出待簽核醫令草稿供醫師
-   確認，還是別的整合方式——這一步涉及實際下醫囑，不建議做成完全無人
-   審閱的全自動開立，應保留醫師簽核步驟。
+3. 分支 C（通知/協助開立檢驗）：確認要用什麼管道通知醫師（HIS 內建
+   訊息/院內 App/其他），以及「協助開立」（`kind=DATA_GAP` 的缺項）是指
+   跳出待簽核醫令草稿供醫師確認，還是別的整合方式——這一步涉及實際下
+   醫囑，不建議做成完全無人審閱的全自動開立，應保留醫師簽核步驟。
 
 ## 目錄結構
 
@@ -118,7 +135,7 @@ p4p/
 pip install -r requirements.txt
 ```
 
-執行測試（11 個測試）：
+執行測試（16 個測試）：
 
 ```bash
 pytest tests/ -q
@@ -152,7 +169,14 @@ state = PatientEnrollmentState(
 engine = EligibilityEngine()
 report = engine.evaluate(state)
 for result in report.results:
-    print(result.code, result.eligible, result.missing_requirements)
+    if result.eligible:
+        print(result.code, "eligible — 可自動收案", result.points)
+    elif result.is_pending_timing_only():
+        pass  # 純排程等待（未到期/已達上限），保持靜默，不通知任何人
+    else:
+        # 真正值得處理的缺項——依 kind 決定要通知醫師還是協助開立檢驗
+        for reason in result.actionable_missing_reasons():
+            print(result.code, reason.kind.value, reason.detail)
 ```
 
 更完整的架構說明、規則設計理由、已知限制與待釐清事項清單，請見

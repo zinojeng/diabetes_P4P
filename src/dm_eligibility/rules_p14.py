@@ -16,6 +16,8 @@ from .models import (
     EligibilityConfig,
     EligibilityResult,
     LabRequirement,
+    MissingReason,
+    MissingReasonKind,
     PatientEnrollmentState,
 )
 
@@ -87,14 +89,19 @@ def _with_ga_substitute(
 
 def check_lab_requirements(
     state: PatientEnrollmentState, requirements: tuple[LabRequirement, ...], as_of: date
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[MissingReason]]:
     """檢查一組 LabRequirement 是否皆已於各自窗口內滿足。回傳
     (是否全數滿足, 缺漏項目描述清單)。"""
-    missing: list[str] = []
+    missing: list[MissingReason] = []
     for req in requirements:
         found = state.latest_lab_within(req.alternatives, as_of, req.max_age_days)
         if found is None:
-            missing.append(f"缺少檢驗：{req.description}（需於{req.max_age_days}天內）")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.DATA_GAP,
+                    f"缺少檢驗：{req.description}（需於{req.max_age_days}天內）",
+                )
+            )
     return (len(missing) == 0, missing)
 
 
@@ -142,13 +149,16 @@ def check_p1407_eligibility(
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
-    missing: list[str] = []
+    missing: list[MissingReason] = []
 
     # 條件1：90天內就醫達2次(含)以上，且皆有E08-E13診斷
     qualifying_visits = _qualifying_dm_visits(state, as_of)
     if len(qualifying_visits) < 2:
         missing.append(
-            f"最近90天內同院所以E08-E13診斷之就醫僅{len(qualifying_visits)}次，需≥2次"
+            MissingReason(
+                MissingReasonKind.PREREQUISITE,
+                f"最近90天內同院所以E08-E13診斷之就醫僅{len(qualifying_visits)}次，需≥2次",
+            )
         )
     else:
         reasons.append(f"90天內符合條件之DM就醫共{len(qualifying_visits)}次")
@@ -156,18 +166,28 @@ def check_p1407_eligibility(
     # 當次就診（as_of 當日）是否存在，且為主診斷 E08-E13
     today_visit = next((e for e in state.valid_encounters() if e.visit_date == as_of), None)
     if today_visit is None:
-        missing.append("當次就診(as_of_date)資料不存在，無法收案")
+        missing.append(MissingReason(MissingReasonKind.BLOCKED, "當次就診(as_of_date)資料不存在，無法收案"))
     else:
         if not today_visit.has_diagnosis_prefix(DM_ICD10_PREFIXES, primary_only=True):
-            missing.append("當次就診之主診斷非 E08-E13")
+            missing.append(MissingReason(MissingReasonKind.BLOCKED, "當次就診之主診斷非 E08-E13"))
         else:
             reasons.append("當次就診主診斷為 E08-E13")
 
         if today_visit.clinic_type_code in cfg.excluded_clinic_type_codes:
-            missing.append(f"當次掛號診別代碼({today_visit.clinic_type_code})屬排除名單")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.BLOCKED,
+                    f"當次掛號診別代碼({today_visit.clinic_type_code})屬排除名單",
+                )
+            )
 
         if not today_visit.has_medication_prefix(DM_MEDICATION_ATC_PREFIX):
-            missing.append(f"當次就診未開立 ATC前3碼={DM_MEDICATION_ATC_PREFIX} 之糖尿病用藥")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.BLOCKED,
+                    f"當次就診未開立 ATC前3碼={DM_MEDICATION_ATC_PREFIX} 之糖尿病用藥",
+                )
+            )
         else:
             reasons.append("當次就診已開立糖尿病用藥(A10)")
 
@@ -179,34 +199,52 @@ def check_p1407_eligibility(
             e for e in qualifying_visits if e.visit_date != as_of and e.has_medication_prefix(DM_MEDICATION_ATC_PREFIX)
         ]
         if not earlier_visits_with_med:
-            missing.append("config要求較早一次就診須已開立用藥，但查無符合紀錄")
+            missing.append(
+                MissingReason(MissingReasonKind.PREREQUISITE, "config要求較早一次就診須已開立用藥，但查無符合紀錄")
+            )
 
     # 排除：同院所1年內結案
     if state.closed_within_days(as_of, 365):
         latest = state.latest_closure()
-        missing.append(f"同院所1年內曾結案（結案日:{latest.closure_date}，原因:{latest.reason}），1年內不得再收案")
+        missing.append(
+            MissingReason(
+                MissingReasonKind.BLOCKED,
+                f"同院所1年內曾結案（結案日:{latest.closure_date}，原因:{latest.reason}），1年內不得再收案",
+            )
+        )
 
     # 排除：VPN查詢已被他院收案中。None(未知)一律保守視為不可收案，
     # 不可靜默假設「沒查過就當作沒有」。
     if state.vpn_other_institution_enrolled is None:
-        missing.append("VPN查詢結果未知，需先完成他院收案查核方可判斷是否可收案")
+        missing.append(
+            MissingReason(MissingReasonKind.BLOCKED, "VPN查詢結果未知，需先完成他院收案查核方可判斷是否可收案")
+        )
     elif state.vpn_other_institution_enrolled:
-        missing.append("VPN查詢顯示已被他院收案中(1年內有追蹤紀錄)，排除收案")
+        missing.append(
+            MissingReason(MissingReasonKind.BLOCKED, "VPN查詢顯示已被他院收案中(1年內有追蹤紀錄)，排除收案")
+        )
     else:
         reasons.append("VPN查詢確認未被他院收案中")
 
     # 院內系統實作條件：年齡 >= 18
     if cfg.enforce_age_18_plus:
         if state.age_years is None:
-            missing.append("年齡未知，無法確認是否符合最低年齡限制")
+            missing.append(MissingReason(MissingReasonKind.BLOCKED, "年齡未知，無法確認是否符合最低年齡限制"))
         elif state.age_years < cfg.minimum_age_years:
-            missing.append(f"年齡{state.age_years}歲，未滿{cfg.minimum_age_years}歲")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.BLOCKED,
+                    f"年齡{state.age_years}歲，未滿{cfg.minimum_age_years}歲",
+                )
+            )
 
     # 已收案過(P1407C)不可重複收案（同一輪管理照護只需1次）
     if state.has_claim("P1407C") and not state.closed_within_days(as_of, 3650):
         # 若曾結案後已滿1年重新收案，允許重收；否則視為重複收案。
         if state.latest_closure() is None:
-            missing.append("病人已有P1407C收案紀錄且尚未結案，不可重複收案")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, "病人已有P1407C收案紀錄且尚未結案，不可重複收案")
+            )
 
     # 檢驗齊全
     lab_ok, lab_missing = check_lab_requirements(
@@ -218,7 +256,12 @@ def check_p1407_eligibility(
 
     eligible = len(missing) == 0
     return EligibilityResult(
-        code="P1407C", eligible=eligible, points=650 if eligible else None, reasons=reasons, missing_requirements=missing
+        code="P1407C",
+        eligible=eligible,
+        points=650 if eligible else None,
+        reasons=reasons,
+        missing_requirements=[r.detail for r in missing],
+        missing_reasons=missing,
     )
 
 
@@ -240,11 +283,17 @@ def check_p1408_eligibility(
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
-    missing: list[str] = []
+    missing: list[MissingReason] = []
 
     if not state.has_claim("P1407C"):
-        missing.append("尚未申報P1407C，不符合P1408C前提")
-        return EligibilityResult(code="P1408C", eligible=False, missing_requirements=missing, reasons=reasons)
+        missing.append(MissingReason(MissingReasonKind.PREREQUISITE, "尚未申報P1407C，不符合P1408C前提"))
+        return EligibilityResult(
+            code="P1408C",
+            eligible=False,
+            missing_requirements=[r.detail for r in missing],
+            missing_reasons=missing,
+            reasons=reasons,
+        )
 
     p1408_count_this_year = state.count_claims("P1408C", year=as_of.year)
     last_p1408 = state.last_claim_date("P1408C", before=as_of)
@@ -255,15 +304,20 @@ def check_p1408_eligibility(
         days_since = (as_of - p1407_date).days
         if days_since < cfg.first_p1408_interval_days:
             missing.append(
-                f"距P1407C申報日僅{days_since}天，未滿{cfg.first_p1408_interval_days}天"
-                f"（法規現行文字為七週；院內舊系統邏輯為70天，見待釐清事項Q1）"
+                MissingReason(
+                    MissingReasonKind.TIMING,
+                    f"距P1407C申報日僅{days_since}天，未滿{cfg.first_p1408_interval_days}天"
+                    f"（法規現行文字為七週；院內舊系統邏輯為70天，見待釐清事項Q1）",
+                )
             )
         else:
             reasons.append(f"距P1407C申報日已{days_since}天，達第1次P1408C間隔門檻")
     else:
         days_since = (as_of - last_p1408).days
         if days_since < 70:
-            missing.append(f"距上次P1408C申報僅{days_since}天，未滿70天(十週)")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, f"距上次P1408C申報僅{days_since}天，未滿70天(十週)")
+            )
         else:
             reasons.append(f"距上次P1408C申報已{days_since}天，達十週間隔門檻")
 
@@ -272,20 +326,28 @@ def check_p1408_eligibility(
         combined_count = state.count_claims(("P1408C", "P1410C", "P7001C"), year=as_of.year)
         if combined_count >= 3:
             missing.append(
-                f"當年度P1408C+P1410C+P7001C合計已{combined_count}次，達上限3次"
+                MissingReason(
+                    MissingReasonKind.TIMING,
+                    f"當年度P1408C+P1410C+P7001C合計已{combined_count}次，達上限3次",
+                )
             )
         else:
             reasons.append(f"當年度P1408C+P1410C+P7001C合計{combined_count}次，未達上限")
     else:
         if p1408_count_this_year >= 3:
-            missing.append(f"當年度P1408C已申報{p1408_count_this_year}次，達上限3次")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, f"當年度P1408C已申報{p1408_count_this_year}次，達上限3次")
+            )
 
     # 第二階段/P7體系鎖定
     if cfg.lock_stage1_after_stage2_or_p7:
         lock_date = state.entered_stage2_date or state.entered_p7_date
         if lock_date is not None and (as_of - lock_date).days < 365:
             missing.append(
-                f"已於{lock_date}進入第二階段/P7體系，1年內不得再申報P1408C"
+                MissingReason(
+                    MissingReasonKind.TIMING,
+                    f"已於{lock_date}進入第二階段/P7體系，1年內不得再申報P1408C",
+                )
             )
 
     # 檢驗齊全
@@ -298,7 +360,14 @@ def check_p1408_eligibility(
 
     eligible = len(missing) == 0
     points = 200 if eligible else None
-    return EligibilityResult(code="P1408C", eligible=eligible, points=points, reasons=reasons, missing_requirements=missing)
+    return EligibilityResult(
+        code="P1408C",
+        eligible=eligible,
+        points=points,
+        reasons=reasons,
+        missing_requirements=[r.detail for r in missing],
+        missing_reasons=missing,
+    )
 
 
 def check_p1409_eligibility(
@@ -323,33 +392,47 @@ def check_p1409_eligibility(
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
-    missing: list[str] = []
+    missing: list[MissingReason] = []
 
     last_p1408 = state.last_claim_date("P1408C", before=as_of)
     if last_p1408 is None:
-        missing.append("尚無P1408C申報紀錄，不符合P1409C前提")
+        missing.append(MissingReason(MissingReasonKind.PREREQUISITE, "尚無P1408C申報紀錄，不符合P1409C前提"))
     else:
         days_since = (as_of - last_p1408).days
         if days_since < 70:
-            missing.append(f"距上次P1408C申報僅{days_since}天，未滿70天(十週)")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, f"距上次P1408C申報僅{days_since}天，未滿70天(十週)")
+            )
         else:
             reasons.append(f"距上次P1408C申報已{days_since}天，達十週間隔門檻")
 
     prereq_codes = ("P1407C", "P1408C", "P7001C") if cfg.enforce_cross_program_caps else ("P1407C", "P1408C")
     lifetime_count = state.count_claims(prereq_codes)  # 終身累計，不帶year
     if lifetime_count < 3:
-        missing.append(f"{'+'.join(prereq_codes)} 終身累計僅{lifetime_count}次，需≥3次")
+        missing.append(
+            MissingReason(
+                MissingReasonKind.PREREQUISITE,
+                f"{'+'.join(prereq_codes)} 終身累計僅{lifetime_count}次，需≥3次",
+            )
+        )
     else:
         reasons.append(f"{'+'.join(prereq_codes)} 終身累計{lifetime_count}次，達前提門檻")
 
     year_count = state.count_claims("P1409C", year=as_of.year)  # 本年度計數器，與上面終身計數器分開
     if year_count > 0:
-        missing.append(f"本年度P1409C已申報{year_count}次，每年度限1次")
+        missing.append(
+            MissingReason(MissingReasonKind.TIMING, f"本年度P1409C已申報{year_count}次，每年度限1次")
+        )
 
     if cfg.lock_stage1_after_stage2_or_p7:
         lock_date = state.entered_stage2_date or state.entered_p7_date
         if lock_date is not None and (as_of - lock_date).days < 365:
-            missing.append(f"已於{lock_date}進入第二階段/P7體系，1年內不得再申報P1409C")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.TIMING,
+                    f"已於{lock_date}進入第二階段/P7體系，1年內不得再申報P1409C",
+                )
+            )
 
     lab_ok, lab_missing = check_lab_requirements(
         state, _with_ga_substitute(P1409_LAB_REQUIREMENTS_BASE, cfg), as_of
@@ -360,7 +443,14 @@ def check_p1409_eligibility(
 
     eligible = len(missing) == 0
     points = 800 if eligible else None
-    return EligibilityResult(code="P1409C", eligible=eligible, points=points, reasons=reasons, missing_requirements=missing)
+    return EligibilityResult(
+        code="P1409C",
+        eligible=eligible,
+        points=points,
+        reasons=reasons,
+        missing_requirements=[r.detail for r in missing],
+        missing_reasons=missing,
+    )
 
 
 def check_stage2_entry_eligible(state: PatientEnrollmentState) -> bool:
@@ -386,28 +476,47 @@ def check_p1410_eligibility(
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
-    missing: list[str] = []
+    missing: list[MissingReason] = []
 
     if not check_stage2_entry_eligible(state):
-        missing.append("尚未完整申報第一階段(P1407Cx1+P1408C>=5+P1409C>=2)，不符合第二階段資格")
+        missing.append(
+            MissingReason(
+                MissingReasonKind.PREREQUISITE,
+                "尚未完整申報第一階段(P1407Cx1+P1408C>=5+P1409C>=2)，不符合第二階段資格",
+            )
+        )
 
     last_p1410 = state.last_claim_date("P1410C", before=as_of)
     if last_p1410 is not None:
         days_since = (as_of - last_p1410).days
         if days_since < 70:
-            missing.append(f"距上次P1410C申報僅{days_since}天，未滿70天(十週)")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, f"距上次P1410C申報僅{days_since}天，未滿70天(十週)")
+            )
     # 第1次未強制規定間隔基準（規格書未逐字明示），保守起見不放行未進入第二階段者
 
     if cfg.enforce_cross_program_caps:
         combined = state.count_claims(("P1408C", "P1410C", "P7001C"), year=as_of.year)
         if combined >= 3:
-            missing.append(f"當年度P1408C+P1410C+P7001C合計已{combined}次，達上限3次")
+            missing.append(
+                MissingReason(
+                    MissingReasonKind.TIMING,
+                    f"當年度P1408C+P1410C+P7001C合計已{combined}次，達上限3次",
+                )
+            )
     else:
         if state.count_claims("P1410C", year=as_of.year) >= 3:
-            missing.append("當年度P1410C已達上限3次")
+            missing.append(MissingReason(MissingReasonKind.TIMING, "當年度P1410C已達上限3次"))
 
     eligible = len(missing) == 0
-    return EligibilityResult(code="P1410C", eligible=eligible, points=100 if eligible else None, reasons=reasons, missing_requirements=missing)
+    return EligibilityResult(
+        code="P1410C",
+        eligible=eligible,
+        points=100 if eligible else None,
+        reasons=reasons,
+        missing_requirements=[r.detail for r in missing],
+        missing_reasons=missing,
+    )
 
 
 def check_p1411_eligibility(
@@ -421,25 +530,36 @@ def check_p1411_eligibility(
     cfg = config or EligibilityConfig()
     as_of = state.as_of_date
     reasons: list[str] = []
-    missing: list[str] = []
+    missing: list[MissingReason] = []
 
     last_tracking = state.last_claim_date(("P1408C", "P1410C"), before=as_of)
     if last_tracking is None:
-        missing.append("尚無P1408C/P1410C追蹤紀錄")
+        missing.append(MissingReason(MissingReasonKind.PREREQUISITE, "尚無P1408C/P1410C追蹤紀錄"))
     else:
         days_since = (as_of - last_tracking).days
         if days_since < 70:
-            missing.append(f"距最近一次追蹤照護費僅{days_since}天，未滿70天(十週)")
+            missing.append(
+                MissingReason(MissingReasonKind.TIMING, f"距最近一次追蹤照護費僅{days_since}天，未滿70天(十週)")
+            )
 
     combined = state.count_claims(("P1408C", "P1410C"))
     if combined < 3:
-        missing.append(f"P1408C+P1410C累計僅{combined}次，需≥3次")
+        missing.append(
+            MissingReason(MissingReasonKind.PREREQUISITE, f"P1408C+P1410C累計僅{combined}次，需≥3次")
+        )
 
     if state.count_claims("P1411C", year=as_of.year) > 0:
-        missing.append("本年度P1411C已申報過，每年度限1次")
+        missing.append(MissingReason(MissingReasonKind.TIMING, "本年度P1411C已申報過，每年度限1次"))
 
     eligible = len(missing) == 0
-    return EligibilityResult(code="P1411C", eligible=eligible, points=300 if eligible else None, reasons=reasons, missing_requirements=missing)
+    return EligibilityResult(
+        code="P1411C",
+        eligible=eligible,
+        points=300 if eligible else None,
+        reasons=reasons,
+        missing_requirements=[r.detail for r in missing],
+        missing_reasons=missing,
+    )
 
 
 def check_reenrollment_blocked(state: PatientEnrollmentState) -> bool:

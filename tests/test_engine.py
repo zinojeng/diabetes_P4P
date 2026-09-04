@@ -27,6 +27,7 @@ from dm_eligibility.models import (
     Encounter,
     LabResult,
     MedicationOrder,
+    MissingReasonKind,
     PatientEnrollmentState,
     PhysicianStatus,
 )
@@ -380,10 +381,155 @@ def test_engine_physician_suspension_blocks_all_codes():
     assert any("停權" in m for m in p1407_result.missing_requirements)
 
 
+def test_engine_physician_suspension_reason_is_categorized_as_blocked():
+    """回歸測試：engine.py 在套用醫師停權橫向規則時，直接對
+    EligibilityResult.missing_requirements 做 append()，先前遺漏同步
+    append 到 missing_reasons，會讓兩份清單不同步，且「醫師停權」這筆
+    理由完全沒有分類（既非TIMING/DATA_GAP/PREREQUISITE，也不在
+    BLOCKED——因為根本沒被加進 missing_reasons）。已修正為兩份清單同步
+    append，並分類為 BLOCKED（需要人工介入排除停權狀態，非隨時間自動
+    解除）。"""
+    as_of = date(2026, 4, 1)
+    earlier_visit = as_of - timedelta(days=10)
+    state = base_state(
+        "PAT-SUSPEND-SYNC",
+        as_of,
+        encounters=[dm_encounter(earlier_visit, with_med=False), dm_encounter(as_of)],
+        lab_results=full_p1407_labs(as_of),
+    )
+    physician = PhysicianStatus(
+        physician_id="DOC-BAD",
+        tracking_rate_suspended_until=as_of + timedelta(days=30),
+    )
+    engine = EligibilityEngine()
+    report = engine.evaluate(state, physician=physician)
+
+    p1407_result = report.get("P1407C")
+    assert p1407_result is not None
+    # 兩份清單內容/順序必須一致（向下相容不變式）
+    assert p1407_result.missing_requirements == [r.detail for r in p1407_result.missing_reasons]
+    # 停權理由本身必須被分類，且分類為 BLOCKED（需人工介入，非排程等待）
+    suspension_reasons = [r for r in p1407_result.missing_reasons if "停權" in r.detail]
+    assert len(suspension_reasons) == 1
+    assert suspension_reasons[0].kind == MissingReasonKind.BLOCKED
+    # 因此不應被 is_pending_timing_only() 誤判為「純排程等待、可保持靜默」
+    assert p1407_result.is_pending_timing_only() is False
+
+
+def test_engine_dual_qualification_reason_is_categorized_as_blocked():
+    """回歸測試（同上，P7系列雙重資格分支）：先前完全無測試覆蓋，且與
+    醫師停權分支犯了同一個 missing_reasons 不同步錯誤，一併修正、一併
+    補上測試。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-DUAL-QUAL-SYNC",
+        as_of,
+        claims=[CodeClaim(code="P1407C", claim_date=as_of - timedelta(days=100))],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=80.0, upcr=200.0, is_diabetic=True)],
+    )
+    physician = PhysicianStatus(physician_id="DOC-NOT-DUAL", is_dm_ckd_dual_qualified=False)
+    engine = EligibilityEngine()
+    report = engine.evaluate(state, physician=physician)
+
+    for code in ("P7001C", "P7002C", "P7003C"):
+        result = report.get(code)
+        assert result is not None
+        assert result.eligible is False
+        assert result.missing_requirements == [r.detail for r in result.missing_reasons]
+        dual_reasons = [r for r in result.missing_reasons if "雙重資格" in r.detail]
+        assert len(dual_reasons) == 1
+        assert dual_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
 # ---------------------------------------------------------------------------
 # 11. EligibilityEngine：年度評估碼(P1409C/P1411C/P7002C)互斥，多筆同時
 #     符合資格時應出現人工擇一警告，引擎不自動代為選擇
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 12. EligibilityResult.missing_reasons：純排程等待(TIMING)時
+#     is_pending_timing_only() 應為 True，且不產生任何 actionable 項目
+# ---------------------------------------------------------------------------
+
+
+def test_p1408_pending_timing_only_when_not_enough_days_since_last_claim():
+    """病人已符合P1408C各項前提，僅因距上次P1408C申報僅10天(未滿70天)
+    而不合格——這是完全正常的排程等待狀態，missing_reasons應只有一項
+    kind=TIMING，is_pending_timing_only()應為True，actionable_missing_
+    reasons()應為空清單（背景自動化流程對此應保持靜默、不通知）。"""
+    p1407_date = date(2026, 1, 1)
+    last_p1408_date = p1407_date + timedelta(days=49)
+    as_of = last_p1408_date + timedelta(days=10)  # 僅間隔10天，未滿70天
+
+    state = base_state(
+        "PAT-P1408-TIMING",
+        as_of,
+        claims=[
+            CodeClaim(code="P1407C", claim_date=p1407_date),
+            CodeClaim(code="P1408C", claim_date=last_p1408_date),
+        ],
+        lab_results=full_p1408_labs(as_of),
+    )
+    result = check_p1408_eligibility(state)
+
+    assert result.eligible is False
+    assert result.is_pending_timing_only() is True
+    assert result.actionable_missing_reasons() == []
+    assert len(result.missing_reasons) == 1
+    assert result.missing_reasons[0].kind == MissingReasonKind.TIMING
+
+
+# ---------------------------------------------------------------------------
+# 13. EligibilityResult.missing_reasons：缺檢驗資料應分類為DATA_GAP，
+#     且出現在actionable_missing_reasons()中（值得協助安排/開立）
+# ---------------------------------------------------------------------------
+
+
+def test_p1407_missing_lab_classified_as_data_gap():
+    as_of = date(2026, 4, 1)
+    earlier_visit = as_of - timedelta(days=30)
+
+    labs = full_p1407_labs(as_of)
+    labs = [lr for lr in labs if lr.item_code != "09006C"]  # 故意缺HbA1C
+
+    state = base_state(
+        "PAT-P1407-DATAGAP",
+        as_of,
+        encounters=[dm_encounter(earlier_visit, with_med=False), dm_encounter(as_of)],
+        lab_results=labs,
+    )
+    result = check_p1407_eligibility(state)
+
+    assert result.eligible is False
+    data_gap_reasons = [r for r in result.missing_reasons if r.kind == MissingReasonKind.DATA_GAP]
+    assert any("HbA1C" in r.detail for r in data_gap_reasons)
+    actionable_details = [r.detail for r in result.actionable_missing_reasons()]
+    assert any("HbA1C" in d for d in actionable_details)
+
+
+# ---------------------------------------------------------------------------
+# 14. EligibilityResult：missing_requirements（舊字串清單）內容與順序
+#     和missing_reasons的detail完全一致，確認向後相容
+# ---------------------------------------------------------------------------
+
+
+def test_missing_requirements_matches_missing_reasons_details_in_order():
+    """既有測試情境(90天就醫窗邊界在外)的eligible=False結果，驗證舊的
+    missing_requirements字串清單內容/順序，與新missing_reasons的detail
+    欄位逐一對應一致——確保這次重構未改變任何訊息文字或順序。"""
+    as_of = date(2026, 4, 1)
+    earlier_visit_out = as_of - timedelta(days=91)
+    state_out = base_state(
+        "PAT-COMPAT",
+        as_of,
+        encounters=[dm_encounter(earlier_visit_out, with_med=False), dm_encounter(as_of)],
+        lab_results=full_p1407_labs(as_of),
+    )
+    result = check_p1407_eligibility(state_out)
+
+    assert result.eligible is False
+    assert result.missing_requirements == [r.detail for r in result.missing_reasons]
 
 
 def test_engine_flags_mutual_exclusion_between_annual_codes():
