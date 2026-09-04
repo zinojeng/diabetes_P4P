@@ -53,7 +53,7 @@ P4P 專案「儘可能不干擾醫療照護行為」的目標，具體展開是�
 寫回時同步呼叫（事件驅動），還是每日批次掃描在院病人（排程驅動）；本
 repo 不預設任何一種，因為這屬於院內系統架構決策。
 
-**② 本 repo：判斷**——已完整實作且有測試覆蓋（39 個測試）。
+**② 本 repo：判斷**——已完整實作且有測試覆蓋（40 個測試）。
 `EligibilityEngine.evaluate(state, physician)` 是唯一入口，純函式、無
 副作用、不呼叫任何外部系統；`EligibilityReport.eligible_codes()` 給
 分支 A 用。分支 B/C 的判斷曾經是本節的一個已知缺口——`missing_
@@ -140,7 +140,7 @@ p4p/
 pip install -r requirements.txt
 ```
 
-執行測試（39 個測試）：
+執行測試（40 個測試）：
 
 ```bash
 pytest tests/ -q

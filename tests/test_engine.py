@@ -642,11 +642,11 @@ def test_p4301_ckd_proteinuria_measured_but_below_threshold_is_blocked():
     assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
 
 
-def test_p4301_ckd_diabetic_upcr_negative_but_uacr_missing_is_data_gap():
-    """回歸測試（Codex review 二次驗證發現的殘留bug）：糖尿病患者eGFR=70
-    (合格區間)，UPCR已測得且未達150門檻，但UACR未測——UACR仍可能是
-    遺漏的陽性結果(>=30)，不能視為「資料齊全、確定不符合」，應維持
-    DATA_GAP，不可誤判為BLOCKED。"""
+def test_p4301_ckd_diabetic_upcr_negative_and_uacr_missing_is_blocked():
+    """回歸測試（2026-09-05 依臨床端意見修正）：糖尿病患者eGFR=70(合格
+    區間)，UPCR已測得且未達150門檻，UACR未測——UPCR是通用檢驗，糖尿病
+    患者只要UPCR或UACR任一項已測得即足夠判定，不需兩項都測過，故應為
+    BLOCKED（資料齊全、確定不符合），不是DATA_GAP。"""
     as_of = date(2026, 4, 1)
     state = base_state(
         "PAT-CKD-UPCR-ONLY",
@@ -658,18 +658,37 @@ def test_p4301_ckd_diabetic_upcr_negative_but_uacr_missing_is_data_gap():
     assert result.eligible is False
     ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
     assert len(ckd_reasons) == 1
-    assert ckd_reasons[0].kind == MissingReasonKind.DATA_GAP
+    assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
 
 
-def test_p4301_ckd_diabetic_uacr_negative_but_upcr_missing_is_data_gap():
-    """同上，另一半：糖尿病患者UACR已測得且未達30門檻，但UPCR未測——
-    UPCR仍可能是遺漏的陽性結果(>=150)，應維持DATA_GAP。"""
+def test_p4301_ckd_diabetic_uacr_alone_is_sufficient_and_blocked():
+    """回歸測試（2026-09-05 依臨床端意見修正）：糖尿病患者常規以UACR
+    追蹤蛋白尿，UACR已測得且未達30門檻即足夠判定，不需UPCR也測過——
+    「確診糖尿病病人，檢查UACR即足夠」，UPCR未測不應影響判定，應為
+    BLOCKED而非DATA_GAP。"""
     as_of = date(2026, 4, 1)
     state = base_state(
         "PAT-CKD-UACR-ONLY",
         as_of,
         encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
         ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=None, uacr=10.0, is_diabetic=True)],
+    )
+    result = check_p4301_eligibility(state)
+    assert result.eligible is False
+    ckd_reasons = [r for r in result.missing_reasons if "CKD分期評估" in r.detail]
+    assert len(ckd_reasons) == 1
+    assert ckd_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+def test_p4301_ckd_diabetic_both_upcr_and_uacr_missing_is_data_gap():
+    """對照組：糖尿病患者UPCR、UACR皆未測——兩項檢驗一項都沒做，才是
+    真正的資料不足(DATA_GAP)，與上面兩個「只測一項就足夠」的案例對照。"""
+    as_of = date(2026, 4, 1)
+    state = base_state(
+        "PAT-CKD-BOTH-MISSING",
+        as_of,
+        encounters=[ckd_encounter(as_of - timedelta(days=30)), ckd_encounter(as_of)],
+        ckd_assessments=[CKDAssessment(assessment_date=as_of, egfr=70.0, upcr=None, uacr=None, is_diabetic=True)],
     )
     result = check_p4301_eligibility(state)
     assert result.eligible is False

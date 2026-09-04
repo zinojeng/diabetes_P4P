@@ -205,16 +205,18 @@ class CKDAssessment:
             （BLOCKED）——即使蛋白尿資料也缺，eGFR本身已排除Stage1/2/3a。
           - 45<=eGFR<60：Stage3a只看eGFR，不需蛋白尿佐證，資料已足夠
             （不會是data_incomplete，此時必為符合）。
-          - eGFR>=60：Stage1/2需蛋白尿(UPCR>=150或糖尿病患UACR>=30)佐證，
-            兩者為「任一達標即算陽性」的OR關係。若已知其中一項達標，
-            資料足夠（已符合）。若尚未達標，必須「每一個可能讓其變陽性
-            的檢驗項目都已測得」才能確定是「真的不符合」而非「還有檢驗
-            沒做」：非糖尿病只需UPCR一項；糖尿病則UPCR與UACR兩項都要
-            測得——只測其中一項且為陰性，另一項仍可能是遺漏的陽性結果，
-            此時仍屬資料不足（DATA_GAP），不可視為確定不符合（BLOCKED）。
-            ★ Codex review 二次驗證發現的修正：先前用 or 判斷「蛋白尿
-            資料是否已知」，導致糖尿病患者只測UPCR或只測UACR其中一項
-            (陰性)、另一項缺測時，被誤判為資料齊全，錯誤歸為BLOCKED。
+          - eGFR>=60：Stage1/2需蛋白尿(UPCR>=150或糖尿病患UACR>=30)佐證。
+            非糖尿病患者只有UPCR這條路徑（UACR的30 mg/g切點僅適用糖尿病
+            患者），只需UPCR即可判定「資料是否足夠」。
+            ★ 糖尿病患者的臨床判斷（2026-09-05 由臨床端確認修正）：對確診
+            糖尿病病人，UACR 是常規追蹤蛋白尿的標準檢驗，臨床實務上「已
+            測得UACR」本身即足以判定資料完整，不需要求同時也測UPCR才能
+            下結論——UPCR/UACR 雖然在程式邏輯上是「任一達標即算陽性」的
+            OR 關係，但這不代表臨床上兩項都要測過才算「檢驗做完」；只要
+            UPCR 或 UACR 其中一項已測得（且未達陽性門檻），即視為資料
+            齊全、確定不符合。（先前一度依「OR條件兩條路徑理論上都要
+            排除」的純邏輯推論改為要求兩項皆測得，但這不符合糖尿病患者
+            臨床追蹤慣例，已依臨床端意見改回。）
         """
         if self.egfr is None:
             return True
@@ -225,11 +227,11 @@ class CKDAssessment:
         )
         if proteinuria_positive:
             return False  # 已符合，非缺資料（理論上 stage() 此時不會是 None）
-        if self.upcr is None:
-            return True  # UPCR未測，仍可能是遺漏的陽性結果
-        if self.is_diabetic and self.uacr is None:
-            return True  # 糖尿病患者UACR未測，仍可能是遺漏的陽性結果
-        return False  # 每個可能讓其陽性的項目都已測得且皆未達標，確定不符合
+        if self.is_diabetic:
+            # 糖尿病患者：UPCR、UACR任一項已測得即足夠（臨床上常規以
+            # UACR追蹤，不強制要求UPCR也測過）。
+            return self.upcr is None and self.uacr is None
+        return self.upcr is None  # 非糖尿病患者：只有UPCR這條路徑適用
 
 
 # ---------------------------------------------------------------------------
