@@ -120,17 +120,19 @@ class EligibilityEngine:
                         result.points = None
                     # ★ 修正：先前只 append 到 missing_requirements（純字串
                     # 清單），未同步 append 到 missing_reasons，會讓兩份清單
-                    # 內容不同步、且這筆理由完全沒有分類。分類為 BLOCKED：
-                    # 停權雖有明訂到期日（PhysicianStatus.tracking_rate_
-                    # suspended_until/falsification_suspended_until，屆期後
-                    # suspension_reason() 會自動回傳 None），並非「需要人工
-                    # 排除」——但停權本身是需要被看見的行政狀態（見
-                    # docs/系統設計說明.md／Codex review：是否該歸TIMING、
-                    # 讓背景流程對「仍在停權中」保持靜默，屬於待與院內個管
-                    # /品管端確認的routing判斷，非本引擎能片面決定，暫維持
-                    # BLOCKED的保守選擇，即「至少要有人看到」）。
+                    # 內容不同步、且這筆理由完全沒有分類。
+                    # ★ 分類決策（2026-09-05 review 後定案）：TIMING，不是
+                    # BLOCKED。停權有明訂到期日（PhysicianStatus.tracking_
+                    # rate_suspended_until/falsification_suspended_until，
+                    # 屆期後 suspension_reason() 自動回傳 None），停權本身
+                    # 是先前已由品管流程審核並「已知」的行政決定——本引擎
+                    # 每次評估都重複回報「醫師仍在停權中、還要等N天」不會
+                    # 帶來新資訊，只會製造每日洗版通知，正是本refactor想
+                    # 避免的干擾。若需要「醫師剛被停權/即將解除停權」這種
+                    # 一次性事件通知，應由停權狀態變更當下觸發的獨立事件
+                    # 機制負責，不該由每次個案資格評估來重複承擔。
                     result.missing_requirements.append(suspension_reason)
-                    result.missing_reasons.append(MissingReason(MissingReasonKind.BLOCKED, suspension_reason))
+                    result.missing_reasons.append(MissingReason(MissingReasonKind.TIMING, suspension_reason))
 
             # --- P7 系列醫師雙重資格 ------------------------------------
             # 出處：P7 spec (a) doc2-p70-doctor-eligibility：「符合可帶入

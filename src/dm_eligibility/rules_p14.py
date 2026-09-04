@@ -205,12 +205,18 @@ def check_p1407_eligibility(
                 MissingReason(MissingReasonKind.PREREQUISITE, "config要求較早一次就診須已開立用藥，但查無符合紀錄")
             )
 
-    # 排除：同院所1年內結案
+    # 排除：同院所1年內結案。★ 分類決策（2026-09-05 review 後定案）：雖然
+    # 結案原因（失聯/拒絕治療/醫師評估可自理/逾一年未執行管理）本身值得
+    # 個管人員留意，但「距結案已幾天、還要等多久才能重收」是純日期計算，
+    # 屆滿1年會自動解除、不需任何人介入，且結案原因在結案當下應已由個管
+    # /醫師審閱記錄過——不是新資訊。歸為BLOCKED會讓背景流程對「還沒滿
+    # 1年」這種每天都會發生的正常倒數狀態每天重複通知，正是本refactor
+    # 想避免的洗版；歸為TIMING才符合「會隨時間自動解除」的判斷核心。
     if state.closed_within_days(as_of, 365):
         latest = state.latest_closure()
         missing.append(
             MissingReason(
-                MissingReasonKind.BLOCKED,
+                MissingReasonKind.TIMING,
                 f"同院所1年內曾結案（結案日:{latest.closure_date}，原因:{latest.reason}），1年內不得再收案",
             )
         )

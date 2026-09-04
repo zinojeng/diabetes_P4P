@@ -385,14 +385,14 @@ def test_engine_physician_suspension_blocks_all_codes():
     assert any("停權" in m for m in p1407_result.missing_requirements)
 
 
-def test_engine_physician_suspension_reason_is_categorized_as_blocked():
+def test_engine_physician_suspension_reason_is_categorized_as_timing():
     """回歸測試：engine.py 在套用醫師停權橫向規則時，直接對
     EligibilityResult.missing_requirements 做 append()，先前遺漏同步
     append 到 missing_reasons，會讓兩份清單不同步，且「醫師停權」這筆
-    理由完全沒有分類（既非TIMING/DATA_GAP/PREREQUISITE，也不在
-    BLOCKED——因為根本沒被加進 missing_reasons）。已修正為兩份清單同步
-    append，並分類為 BLOCKED（需要人工介入排除停權狀態，非隨時間自動
-    解除）。"""
+    理由完全沒有分類。已修正為兩份清單同步 append，並分類為 TIMING——
+    停權有明訂到期日、屆期自動解除，不需任何人介入排除，重複回報「仍在
+    停權中」不會帶來新資訊，只會造成每日洗版通知（2026-09-05 review 後
+    定案，早期版本曾誤分類為BLOCKED）。"""
     as_of = date(2026, 4, 1)
     earlier_visit = as_of - timedelta(days=10)
     state = base_state(
@@ -412,12 +412,12 @@ def test_engine_physician_suspension_reason_is_categorized_as_blocked():
     assert p1407_result is not None
     # 兩份清單內容/順序必須一致（向下相容不變式）
     assert p1407_result.missing_requirements == [r.detail for r in p1407_result.missing_reasons]
-    # 停權理由本身必須被分類，且分類為 BLOCKED（需人工介入，非排程等待）
+    # 停權理由本身必須被分類，且分類為 TIMING（會隨時間自動解除）
     suspension_reasons = [r for r in p1407_result.missing_reasons if "停權" in r.detail]
     assert len(suspension_reasons) == 1
-    assert suspension_reasons[0].kind == MissingReasonKind.BLOCKED
-    # 因此不應被 is_pending_timing_only() 誤判為「純排程等待、可保持靜默」
-    assert p1407_result.is_pending_timing_only() is False
+    assert suspension_reasons[0].kind == MissingReasonKind.TIMING
+    # 因此背景流程應保持靜默，不主動通知（停權本身已是先前已知的行政狀態）
+    assert p1407_result.is_pending_timing_only() is True
 
 
 def test_engine_dual_qualification_reason_is_categorized_as_blocked():
@@ -676,3 +676,30 @@ def test_p7003_referral_condition_blocked_when_data_complete_but_not_indicated()
     referral_reasons = [r for r in result.missing_reasons if "轉診條件" in r.detail]
     assert len(referral_reasons) == 1
     assert referral_reasons[0].kind == MissingReasonKind.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# 16. P1407C：同院所1年內結案冷卻期分類為TIMING（非BLOCKED）
+#     （回歸測試——2026-09-05 決策：結案冷卻期純以日期計算、屆滿1年自動
+#     解除、不需人工介入，歸為BLOCKED會讓背景流程對「還沒滿1年」這種
+#     每天都會發生的正常倒數狀態每天重複通知，應歸TIMING、保持靜默）
+# ---------------------------------------------------------------------------
+
+
+def test_p1407_closure_cooldown_within_1year_is_timing_and_stays_silent():
+    as_of = date(2026, 4, 1)
+    earlier_visit = as_of - timedelta(days=30)
+    state = base_state(
+        "PAT-CLOSURE-COOLDOWN",
+        as_of,
+        encounters=[dm_encounter(earlier_visit, with_med=False), dm_encounter(as_of)],
+        lab_results=full_p1407_labs(as_of),
+        closure_records=[ClosureRecord(closure_date=as_of - timedelta(days=100), reason="長期失聯")],
+    )
+    result = check_p1407_eligibility(state)
+    assert result.eligible is False
+    cooldown_reasons = [r for r in result.missing_reasons if "1年內曾結案" in r.detail]
+    assert len(cooldown_reasons) == 1
+    assert cooldown_reasons[0].kind == MissingReasonKind.TIMING
+    assert result.is_pending_timing_only() is True
+    assert result.actionable_missing_reasons() == []
